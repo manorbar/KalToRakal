@@ -2,25 +2,12 @@ export type Language = 'he' | 'en';
 
 export type TimeMode = 'now' | 'depart_at' | 'arrive_by';
 
-/**
- * Filter / optimize by which direction the user is traveling on the Dankal Red Line:
- * - 'any': Any Dankal station (R1, R2, R3)
- * - 'to_tlv_batyam': Heading West/South toward Tel Aviv / Jaffa / Bat Yam
- * - 'to_pt': Heading East toward Petah Tikva CBS (R1)
- * - 'to_kiryat_arye': Heading North/East toward Kiryat Arye (R2 / R3)
- */
 export type DankalDirection =
   | 'any'
   | 'to_tlv_batyam'
   | 'to_pt'
   | 'to_kiryat_arye';
 
-/**
- * "Run or Chill?" urgency level for catching a live/scheduled bus:
- * - 'chill': 3+ minutes spare before you even need to start walking
- * - 'leave_now': Start walking now (0–2 minutes spare)
- * - 'brisk': Tight connection (-1 minute spare — walk briskly/jog)
- */
 export type UrgencyLevel = 'chill' | 'leave_now' | 'brisk';
 
 export interface DankalStation {
@@ -61,6 +48,16 @@ export interface DankalDataset {
   feeder_routes: Record<string, FeederRoute>;
 }
 
+export interface IntermediateBusStop {
+  stopId: string;
+  stopCode: string;
+  nameHe: string;
+  nameEn: string;
+  lat: number;
+  lon: number;
+  minutesFromBoarding: number;
+}
+
 export interface LiveBusOption {
   id: string;
   lineName: string;
@@ -75,25 +72,27 @@ export interface LiveBusOption {
   walkToBusMeters: number;
   walkToBusMinutes: number;
   waitMinutes: number;
-  spareMinutesToWalk: number; // waitMinutes - walkToBusMinutes
+  spareMinutesToWalk: number;
   urgency: UrgencyLevel;
-  nextBackupBusMinutesLater: number | null; // e.g. "Next bus in +4 min if missed"
+  nextBackupBusMinutesLater: number | null;
   nextBackupBusLine: string | null;
-  leaveHomeFormatted: string; // HH:MM when user should start walking
-  etaFormatted: string; // HH:MM when bus arrives at origin stop
-  arriveStationFormatted: string; // HH:MM when user reaches the Dankal platform
+  leaveHomeFormatted: string;
+  etaFormatted: string;
+  arriveStationFormatted: string;
   rideMinutes: number;
+  intermediateStops: IntermediateBusStop[];
   alightStopId: string;
   alightStopNameHe: string;
   alightStopNameEn: string;
+  alightStopCode: string;
   alightStopLat: number;
   alightStopLon: number;
-  entranceHintHe: string | null; // e.g. "כניסה A" / "צמוד לכניסה"
-  entranceHintEn: string | null; // e.g. "Entrance A" / "Direct entrance"
+  entranceHintHe: string | null;
+  entranceHintEn: string | null;
   walkFromBusMeters: number;
   walkFromBusMinutes: number;
   totalMinutes: number;
-  isRealtime: boolean; // true = live SIRI, false = GTFS scheduled timetable
+  isRealtime: boolean;
 }
 
 export interface StationRecommendation {
@@ -109,4 +108,10 @@ export interface StationRecommendation {
   minutesSavedByBus: number;
   liveBusOptions: LiveBusOption[];
   nextTrainHeadwayMin: string;
+}
+
+export interface SelectedJourney {
+  recommendation: StationRecommendation;
+  mode: 'bus' | 'walk' | 'scooter';
+  busOption?: LiveBusOption;
 }

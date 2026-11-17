@@ -54,6 +54,19 @@ export interface Translations {
   urgencyLeaveNow: string;
   urgencyBrisk: string;
   backupBusHint: string;
+  backToStations: string;
+  activeJourneyTitle: string;
+  step1WalkToBus: string;
+  step2WaitAndBoard: string;
+  step3RideStops: string;
+  step4AlightAndWalk: string;
+  step5BoardDankal: string;
+  stopCodeLabel: string;
+  showStopsCount: string;
+  hideStopsCount: string;
+  startWalkingInMaps: string;
+  navigateToStationMaps: string;
+  tapForTravelScreen: string;
 }
 
 export const STRINGS: Record<Language, Translations> = {
@@ -111,6 +124,19 @@ export const STRINGS: Record<Language, Translations> = {
     urgencyLeaveNow: 'צא עכשיו לתחנה',
     urgencyBrisk: 'הליכה מהירה! (צא מיד)',
     backupBusHint: 'גיבוי: קו {line} עוד +{m} דק\'',
+    backToStations: 'חזרה לכל התחנות',
+    activeJourneyTitle: 'מסלול נסיעה לדנקל',
+    step1WalkToBus: 'הליכה לתחנת האוטובוס',
+    step2WaitAndBoard: 'עלייה על קו {line} ({agency})',
+    step3RideStops: 'נסיעה של {m} דק\' ({s} תחנות)',
+    step4AlightAndWalk: 'ירידה ב-{stop} והליכה לדנקל',
+    step5BoardDankal: 'רציף דנקל {station}',
+    stopCodeLabel: 'מק"ט תחנה',
+    showStopsCount: 'הצג {s} תחנות ביניים',
+    hideStopsCount: 'הסתר תחנות ביניים',
+    startWalkingInMaps: 'נווט בהליכה לתחנת האוטובוס',
+    navigateToStationMaps: 'פתח ניווט לתחנת הדנקל',
+    tapForTravelScreen: 'לחץ לפירוט מסלול וניווט חי ‹',
   },
   en: {
     appTitle: 'KalToRakal',
@@ -166,6 +192,19 @@ export const STRINGS: Record<Language, Translations> = {
     urgencyLeaveNow: 'Leave Now',
     urgencyBrisk: 'Walk Fast! (Tight)',
     backupBusHint: 'Backup: Line {line} in +{m}m',
+    backToStations: 'All Stations',
+    activeJourneyTitle: 'Live Route to Dankal',
+    step1WalkToBus: 'Walk to Bus Stop',
+    step2WaitAndBoard: 'Board Line {line} ({agency})',
+    step3RideStops: 'Ride {m} min ({s} stops)',
+    step4AlightAndWalk: 'Get off at {stop} & walk to Dankal',
+    step5BoardDankal: 'Dankal {station} Platform',
+    stopCodeLabel: 'Stop #',
+    showStopsCount: 'Show {s} stops along the way',
+    hideStopsCount: 'Hide intermediate stops',
+    startWalkingInMaps: 'Start Walking to Bus Stop in Maps',
+    navigateToStationMaps: 'Open Directions to Dankal Station',
+    tapForTravelScreen: 'Tap for live step-by-step route ›',
   },
 };
 

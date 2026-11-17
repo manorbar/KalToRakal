@@ -3,6 +3,7 @@ import {
   DankalDataset,
   DankalDirection,
   DankalStation,
+  IntermediateBusStop,
   LiveBusOption,
   StationRecommendation,
   TimeMode,
@@ -75,6 +76,7 @@ interface FeederMatch {
   alightStopId: string;
   walkFromBusMeters: number;
   rideMinutes: number;
+  intermediateStops: IntermediateBusStop[];
   deps: number[];
 }
 
@@ -89,10 +91,6 @@ function dateToMinutesFromMidnight(d: Date): number {
   return d.getHours() * 60 + d.getMinutes();
 }
 
-/**
- * Extracts a clean entrance / platform hint from the alighting bus stop name & distance:
- * e.g. "ת.רק''ל קרליבך/דרך מנחם בגין A" -> "כניסה A" / "Entrance A"
- */
 function parseEntranceHint(
   alightStopNameHe: string,
   walkFromBusMeters: number
@@ -125,15 +123,12 @@ function stationMatchesDirection(
   direction: DankalDirection
 ): boolean {
   if (direction === 'any' || direction === 'to_tlv_batyam') {
-    // Every Dankal station (R1, R2, R3) has trains heading toward Tel Aviv / Elifelet / Bat Yam
     return true;
   }
   if (direction === 'to_pt') {
-    // Only stations served by R1 can take you directly to Petah Tikva CBS / Jabotinsky PT
     return station.lines.includes('R1');
   }
   if (direction === 'to_kiryat_arye') {
-    // Only stations served by R2 or R3 go to Kiryat Arye / Em HaMoshavot
     return station.lines.includes('R2') || station.lines.includes('R3');
   }
   return true;
@@ -181,7 +176,12 @@ function findCandidateFeederConnections(
 
     const bestAlightPerStation = new Map<
       string,
-      { alightStopId: string; walkFromBusMeters: number; rideMinutes: number }
+      {
+        alightIdx: number;
+        alightStopId: string;
+        walkFromBusMeters: number;
+        rideMinutes: number;
+      }
     >();
 
     for (let j = bestOriginIdx + 1; j < seq.length; j++) {
@@ -199,6 +199,7 @@ function findCandidateFeederConnections(
             existing.rideMinutes + existing.walkFromBusMeters / 80
         ) {
           bestAlightPerStation.set(stId, {
+            alightIdx: j,
             alightStopId: destStopId,
             walkFromBusMeters: walkFromBusM,
             rideMinutes: rideMin,
@@ -208,6 +209,25 @@ function findCandidateFeederConnections(
     }
 
     for (const [stId, alight] of bestAlightPerStation.entries()) {
+      const intermediateStops: IntermediateBusStop[] = [];
+      for (let kIdx = bestOriginIdx + 1; kIdx <= alight.alightIdx; kIdx++) {
+        const [interSid, interTime] = seq[kIdx];
+        const stp = dataset.stops[interSid];
+        if (!stp) continue;
+        intermediateStops.push({
+          stopId: interSid,
+          stopCode: stp.c,
+          nameHe: stp.he,
+          nameEn: stp.en,
+          lat: stp.lat,
+          lon: stp.lon,
+          minutesFromBoarding: Math.max(
+            1,
+            Math.round(interTime - originTimeMin)
+          ),
+        });
+      }
+
       matches.push({
         routeId,
         lineName: route.n,
@@ -220,6 +240,7 @@ function findCandidateFeederConnections(
         alightStopId: alight.alightStopId,
         walkFromBusMeters: alight.walkFromBusMeters,
         rideMinutes: alight.rideMinutes,
+        intermediateStops,
         deps: route.deps || [],
       });
 
@@ -296,7 +317,6 @@ export async function computeRoutesToNearestDankalStations(
       diffFromNowMinutes >= -3 &&
       diffFromNowMinutes <= 20);
 
-  // Filter stations by requested direction on the Red Line
   const candidateStations = dataset.stations.filter((st) =>
     stationMatchesDirection(st, direction)
   );
@@ -428,9 +448,11 @@ export async function computeRoutesToNearestDankalStations(
               arriveStationMinOfDay
             ),
             rideMinutes: m.rideMinutes,
+            intermediateStops: m.intermediateStops,
             alightStopId: m.alightStopId,
             alightStopNameHe: alightStop.he,
             alightStopNameEn: alightStop.en,
+            alightStopCode: alightStop.c,
             alightStopLat: alightStop.lat,
             alightStopLon: alightStop.lon,
             entranceHintHe: entranceHint.he,
@@ -503,9 +525,11 @@ export async function computeRoutesToNearestDankalStations(
             etaFormatted: etaHHMM,
             arriveStationFormatted: formatMinFromMidnight(arriveStationMin),
             rideMinutes: m.rideMinutes,
+            intermediateStops: m.intermediateStops,
             alightStopId: m.alightStopId,
             alightStopNameHe: alightStop.he,
             alightStopNameEn: alightStop.en,
+            alightStopCode: alightStop.c,
             alightStopLat: alightStop.lat,
             alightStopLon: alightStop.lon,
             entranceHintHe: entranceHint.he,
@@ -527,7 +551,6 @@ export async function computeRoutesToNearestDankalStations(
       liveBusOptions.sort((a, b) => a.totalMinutes - b.totalMinutes);
     }
 
-    // Annotate backup bus info (so if option #1 is 'brisk' or 'leave_now', user sees when the next bus is!)
     for (let i = 0; i < liveBusOptions.length - 1; i++) {
       const cur = liveBusOptions[i];
       const next = liveBusOptions.find(
