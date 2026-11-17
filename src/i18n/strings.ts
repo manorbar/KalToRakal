@@ -152,6 +152,13 @@ export interface PresetOrigin {
 
 export const PRESET_ORIGINS: PresetOrigin[] = [
   {
+    id: 'levi_eshkol_ono',
+    name_he: 'דרך לוי אשכול/הרוגי מלכות בבל (קריית אונו)',
+    name_en: 'Levi Eshkol / Harugei Malchut Bavel (Kiryat Ono)',
+    lat: 32.05742,
+    lon: 34.8644,
+  },
+  {
     id: 'dizengoff',
     name_he: 'דיזנגוף סנטר, ת"א',
     name_en: 'Dizengoff Center, TLV',

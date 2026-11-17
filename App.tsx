@@ -47,6 +47,9 @@ export default function App() {
   const [timeMode, setTimeMode] = useState<TimeMode>('now');
   const [targetDate, setTargetDate] = useState<Date>(() => new Date());
   const [showTimePicker, setShowTimePicker] = useState<boolean>(false);
+  const [androidPickerMode, setAndroidPickerMode] = useState<'date' | 'time'>(
+    'date'
+  );
   const [showOriginSheet, setShowOriginSheet] = useState<boolean>(false);
   const [selectedStationId, setSelectedStationId] = useState<string | null>(
     null
@@ -566,13 +569,13 @@ export default function App() {
             />
           </View>
 
-          {/* Native Time Picker Row (Shown when Depart At or Arrive By is selected) */}
+          {/* Native Date + Time Picker Row (Shown when Depart At or Arrive By is selected) */}
           {timeMode !== 'now' && (
             <View style={[styles.timePickerRow, { flexDirection: rowDir }]}>
               <View
                 style={[styles.timePickerLabelGroup, { flexDirection: rowDir }]}
               >
-                <Ionicons name="time-outline" size={16} color="#60A5FA" />
+                <Ionicons name="calendar-outline" size={16} color="#60A5FA" />
                 <Text style={styles.timePickerLabel}>
                   {timeMode === 'depart_at' ? t.modeDepartAt : t.modeArriveBy}:
                 </Text>
@@ -581,20 +584,40 @@ export default function App() {
               {Platform.OS === 'ios' ? (
                 <DateTimePicker
                   value={targetDate}
-                  mode="time"
+                  mode="datetime"
                   display="compact"
                   themeVariant="dark"
                   onChange={handleTimePickerChange}
                 />
               ) : (
-                <TouchableOpacity
-                  style={styles.androidTimeButton}
-                  onPress={() => setShowTimePicker(true)}
-                >
-                  <Text style={styles.androidTimeButtonText}>
-                    {formattedTargetTime}
-                  </Text>
-                </TouchableOpacity>
+                <View style={[styles.androidDateTimeRow, { flexDirection: rowDir }]}>
+                  <TouchableOpacity
+                    style={styles.androidTimeButton}
+                    onPress={() => {
+                      setAndroidPickerMode('date');
+                      setShowTimePicker(true);
+                    }}
+                  >
+                    <Text style={styles.androidTimeButtonText}>
+                      {targetDate.toLocaleDateString(lang === 'he' ? 'he-IL' : 'en-US', {
+                        weekday: 'short',
+                        day: '2-digit',
+                        month: '2-digit',
+                      })}
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.androidTimeButton}
+                    onPress={() => {
+                      setAndroidPickerMode('time');
+                      setShowTimePicker(true);
+                    }}
+                  >
+                    <Text style={styles.androidTimeButtonText}>
+                      {formattedTargetTime}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
               )}
             </View>
           )}
@@ -602,7 +625,7 @@ export default function App() {
           {Platform.OS === 'android' && showTimePicker && (
             <DateTimePicker
               value={targetDate}
-              mode="time"
+              mode={androidPickerMode}
               is24Hour={true}
               display="default"
               onChange={handleTimePickerChange}
@@ -756,16 +779,6 @@ export default function App() {
                           <View style={styles.fastestPill}>
                             <Text style={styles.fastestPillText}>
                               ⚡ {t.fastestOption}
-                            </Text>
-                          </View>
-                        )}
-                        {rec.minutesSavedByBus > 0 && (
-                          <View style={styles.savesPill}>
-                            <Text style={styles.savesPillText}>
-                              {t.savesMinutes.replace(
-                                '{m}',
-                                String(rec.minutesSavedByBus)
-                              )}
                             </Text>
                           </View>
                         )}
@@ -1248,6 +1261,10 @@ const styles = StyleSheet.create({
     color: '#E2E8F0',
     fontSize: 13,
     fontWeight: '700',
+  },
+  androidDateTimeRow: {
+    alignItems: 'center',
+    gap: 6,
   },
   androidTimeButton: {
     backgroundColor: '#1E293B',
