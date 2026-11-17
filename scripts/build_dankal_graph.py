@@ -4,11 +4,13 @@ Builds the KalToRakal static transit index (`src/data/dankal_data.json`) directl
 from the Israeli Ministry of Transport (MoT) official GTFS feed using HTTP Range requests.
 
 Extracts:
-1. All 34 Dankal Red Line stations (R1, R2, R3) with Hebrew & English names, coordinates,
-   city, platform stop codes, and lines served.
-2. Direct Feeder Bus Graph: Every bus route & stop in Gush Dan (within 5km of the Dankal corridor)
-   that travels directly to within 250m of a Dankal station, including scheduled ride duration
-   and alighting stop metadata.
+1. All 34 Dankal Red Line stations (R1, R2, R3) ordered along the corridor for map polyline rendering,
+   with Hebrew & English names, coordinates, city, platform stop codes, and lines served.
+2. Direct Feeder Bus Graph: Every bus route & stop in Gush Dan that travels directly to within 260m
+   of a Dankal station, including:
+   - Stop sequences & relative travel time offsets (`seq`)
+   - Weekday scheduled departure times from the route's first stop (`deps`, in minutes from midnight)
+     so the app can compute exact "Depart At" and "Arrive By" plans for any time of day!
 """
 import urllib.request
 import ssl
@@ -19,6 +21,7 @@ import csv
 import json
 import math
 import os
+import re
 from collections import defaultdict
 
 URL = "https://gtfs.mot.gov.il/gtfsfiles/israel-public-transportation.zip"
@@ -26,7 +29,6 @@ CTX = ssl.create_default_context()
 CTX.check_hostname = False
 CTX.verify_mode = ssl.CERT_NONE
 
-# English station name dictionary for the 34 Dankal Red Line stations
 STATION_EN_NAMES = {
     "תחנה מרכזית פתח תקווה": "Petah Tikva CBS",
     "פינסקר": "Pinsker",
@@ -81,15 +83,9 @@ def fetch_range(start, end):
         return resp.read()
 
 def get_zip_info():
-    req = urllib.request.Request(URL, method="HEAD", headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=15, context=CTX) as resp:
-        # Note: gtfs.mot.gov.il sometimes returns a chunked/short HEAD; fallback to directory listing or known size
-        cl = resp.headers.get("Content-Length")
-    # Fetch directory page to get exact current file size of israel-public-transportation.zip
     dir_req = urllib.request.Request("https://gtfs.mot.gov.il/gtfsfiles/", headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(dir_req, timeout=15, context=CTX) as resp:
         html = resp.read().decode("utf-8", errors="replace")
-    import re
     m = re.search(r"(\d+)\s+<A HREF=\"/gtfsfiles/israel-public-transportation\.zip\"", html, re.I)
     total_size = int(m.group(1)) if m else 135178879
 
@@ -133,7 +129,6 @@ def haversine_m(lat1, lon1, lat2, lon2):
     return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 def parse_city_from_desc(desc):
-    # e.g. "רחוב: מסילת ברזל קו אדום גוש דן עיר: תל אביב יפו רציף: 2   קומה:"
     if "עיר:" in desc:
         after = desc.split("עיר:", 1)[1]
         if "רציף:" in after:
@@ -149,25 +144,31 @@ def main():
     print("1. Reading GTFS Central Directory from gtfs.mot.gov.il...")
     files = get_zip_info()
 
-    print("2. Downloading stops.txt, routes.txt, trips.txt, translations.txt...")
+    print("2. Downloading stops.txt, routes.txt, trips.txt, calendar.txt, translations.txt...")
     stops_txt = download_file_from_zip(files, "stops.txt").decode("utf-8-sig")
     routes_txt = download_file_from_zip(files, "routes.txt").decode("utf-8-sig")
     trips_txt = download_file_from_zip(files, "trips.txt").decode("utf-8-sig")
+    cal_txt = download_file_from_zip(files, "calendar.txt").decode("utf-8-sig")
     trans_txt = download_file_from_zip(files, "translations.txt").decode("utf-8-sig")
 
-    # Build English translation lookup for stop names if available in translations.txt
     en_trans = {}
     for row in csv.DictReader(io.StringIO(trans_txt)):
         if row.get("lang") == "en" and row.get("trans_id"):
             en_trans[row["trans_id"]] = row.get("translation", "")
 
+    # Identify active weekday (Tuesday/Wednesday) service_ids so we collect a clean 1-day departure schedule per route
+    weekday_services = set()
+    for row in csv.DictReader(io.StringIO(cal_txt)):
+        if row.get("tuesday") == "1" or row.get("wednesday") == "1":
+            weekday_services.add(row["service_id"])
+
     dankal_route_ids = {
-        "34445": ("R2", "Kiryat Arye -> Bat Yam (HaKomemiyut)", "קרית אריה ← הקוממיות בת ים"),
-        "34446": ("R2", "Bat Yam (HaKomemiyut) -> Kiryat Arye", "הקוממיות בת ים ← קרית אריה"),
-        "34447": ("R1", "Petah Tikva CBS -> Bat Yam (HaKomemiyut)", "ת. מרכזית פ\"ת ← הקוממיות בת ים"),
-        "34448": ("R1", "Bat Yam (HaKomemiyut) -> Petah Tikva CBS", "הקוממיות בת ים ← ת. מרכזית פ\"ת"),
-        "34449": ("R3", "Kiryat Arye -> Tel Aviv (Elifelet)", "קרית אריה ← אליפלט תל אביב"),
-        "34450": ("R3", "Tel Aviv (Elifelet) -> Kiryat Arye", "אליפלט תל אביב ← קרית אריה"),
+        "34445": "R2",
+        "34446": "R2",
+        "34447": "R1",
+        "34448": "R1",
+        "34449": "R3",
+        "34450": "R3",
     }
 
     routes_by_id = {}
@@ -183,7 +184,6 @@ def main():
     dankal_platforms = []
     for row in csv.DictReader(io.StringIO(stops_txt)):
         lat, lon = float(row["stop_lat"]), float(row["stop_lon"])
-        # Filter to broader Gush Dan bounding box (lat 31.95..32.20, lon 34.70..34.96)
         if not (31.95 <= lat <= 32.20 and 34.70 <= lon <= 34.96):
             continue
         name_he = row["stop_name"]
@@ -201,13 +201,11 @@ def main():
         if "מסילת ברזל קו אדום גוש דן" in row["stop_desc"]:
             dankal_platforms.append(s)
 
-    # Group Dankal platforms into unique stations
     stations_map = {}
     for p in dankal_platforms:
         name_he = p["name_he"]
         if name_he not in stations_map:
             city_he = p["city_he"]
-            # Underground stations in TLV/Ramat Gan/Bnei Brak (from Ben Gurion to Elifelet + Kiryat Arye)
             underground_names = {"קרית אריה", "בן גוריון", "ביאליק", "אבא הלל", "ארלוזורוב", "שאול המלך", "יהודית", "קרליבך", "אלנבי", "אליפלט"}
             stations_map[name_he] = {
                 "id": f"st_{p['stop_code']}",
@@ -227,19 +225,24 @@ def main():
         if p["stop_id"] not in stations_map[name_he]["stop_ids"]:
             stations_map[name_he]["stop_ids"].append(p["stop_id"])
 
-    # Assign lines (R1, R2, R3) to stations based on trips
-    # Pick one representative trip per route_id across Gush Dan
+    # Pick one representative trip per route_id AND map all weekday trips to their route_id
     rep_trip_to_route = {}
     seen_routes = set()
+    weekday_trip_to_route = {}
     for row in csv.DictReader(io.StringIO(trips_txt)):
         rid = row["route_id"]
-        if rid not in seen_routes and rid in routes_by_id:
+        tid = row["trip_id"]
+        sid = row["service_id"]
+        if rid not in routes_by_id:
+            continue
+        if rid not in seen_routes:
             seen_routes.add(rid)
-            rep_trip_to_route[row["trip_id"]] = rid
+            rep_trip_to_route[tid] = rid
+        if sid in weekday_services:
+            weekday_trip_to_route[tid] = rid
 
-    # Map which bus stops are within 260m of each Dankal station
     station_list = list(stations_map.values())
-    stop_to_nearby_stations = defaultdict(list) # stop_id -> list of (station_id, dist_m)
+    stop_to_nearby_stations = defaultdict(list)
     for sid, s in stops_by_id.items():
         if "מסילת ברזל קו אדום גוש דן" in s["desc"]:
             continue
@@ -248,37 +251,45 @@ def main():
             if d <= 260:
                 stop_to_nearby_stations[sid].append((st["id"], round(d)))
 
-    print(f"Found {len(station_list)} Dankal stations and {len(stop_to_nearby_stations)} bus stops right outside Dankal stations.")
-    print("3. Downloading stop_times.txt to build the Gush Dan Direct Feeder Graph...")
+    print("3. Downloading stop_times.txt to build Feeder Graph + Daily Timetables...")
     st_txt = download_file_from_zip(files, "stop_times.txt").decode("utf-8-sig")
 
     trip_stops = defaultdict(list)
+    route_departures = defaultdict(set) # route_id -> set of integer minutes from midnight (at stop_sequence=1)
+
     for row in csv.DictReader(io.StringIO(st_txt)):
         tid = row["trip_id"]
+        seq = int(row["stop_sequence"])
+        if seq == 1 and tid in weekday_trip_to_route:
+            rid = weekday_trip_to_route[tid]
+            route_departures[rid].add(round(to_minutes(row["departure_time"])))
         if tid in rep_trip_to_route:
             sid = row["stop_id"]
             if sid in stops_by_id:
-                trip_stops[tid].append((int(row["stop_sequence"]), sid, row["arrival_time"]))
+                trip_stops[tid].append((seq, sid, row["arrival_time"]))
 
-    # Populate station lines & order for R1/R2/R3
     station_by_stop_id = {}
     for st in station_list:
         for sid in st["stop_ids"]:
             station_by_stop_id[sid] = st
 
+    r1_ordered_station_ids = []
+    r2_branch_station_ids = []
+
     for tid, seq_list in trip_stops.items():
         rid = rep_trip_to_route[tid]
         if rid in dankal_route_ids:
-            line_code = dankal_route_ids[rid][0]
+            line_code = dankal_route_ids[rid]
+            seq_list.sort()
             for seq, sid, _ in seq_list:
                 if sid in station_by_stop_id:
-                    station_by_stop_id[sid]["lines"].add(line_code)
+                    st_obj = station_by_stop_id[sid]
+                    st_obj["lines"].add(line_code)
+                    if rid == "34447" and st_obj["id"] not in r1_ordered_station_ids:
+                        r1_ordered_station_ids.append(st_obj["id"])
+                    if rid == "34445" and seq <= 3 and st_obj["id"] not in r2_branch_station_ids:
+                        r2_branch_station_ids.append(st_obj["id"])
 
-    # Build Feeder Index:
-    # For every bus route that passes near at least one Dankal station, record:
-    # route_id -> { "s": short_name, "a": agency_id, "stops": [ [stop_id, arr_min_offset], ... ] }
-    # Wait: storing just the stop sequence + relative minute offset for each feeder route is SUPER compact!
-    # Let's check how many routes in Gush Dan pass within 260m of any Dankal station!
     feeder_routes = {}
     used_stop_ids = set()
     for st in station_list:
@@ -290,10 +301,9 @@ def main():
         if rid in dankal_route_ids:
             continue
         rinfo = routes_by_id.get(rid)
-        if not rinfo or rinfo["agency_id"] == "2": # skip Israel Railways
+        if not rinfo or rinfo["agency_id"] == "2":
             continue
         seq_list.sort()
-        # Check if any stop on this route is in stop_to_nearby_stations
         has_dankal_connection = any(sid in stop_to_nearby_stations for _, sid, _ in seq_list)
         if not has_dankal_connection:
             continue
@@ -303,17 +313,28 @@ def main():
             rel_min = round(to_minutes(arr_str) - t0, 1)
             compact_stops.append([sid, rel_min])
             used_stop_ids.add(sid)
+        deps_sorted = sorted(list(route_departures.get(rid, [])))
         feeder_routes[rid] = {
             "n": rinfo["short_name"],
             "a": rinfo["agency_id"],
-            "seq": compact_stops
+            "seq": compact_stops,
+            "deps": deps_sorted,
         }
 
-    print(f"Identified {len(feeder_routes)} feeder bus route directions serving Dankal stations across {len(used_stop_ids)} unique Gush Dan stops!")
-
-    # Format final JSON
     formatted_stations = []
-    for st in sorted(station_list, key=lambda x: x["lat"], reverse=True):
+    station_by_id = {st["id"]: st for st in station_list}
+    # Order stations along R1 (Petah Tikva -> Bat Yam) + Kiryat Arye branch
+    ordered_all = []
+    seen_st = set()
+    for st_id in r1_ordered_station_ids + r2_branch_station_ids:
+        if st_id in station_by_id and st_id not in seen_st:
+            seen_st.add(st_id)
+            ordered_all.append(station_by_id[st_id])
+    for st in station_list:
+        if st["id"] not in seen_st:
+            ordered_all.append(st)
+
+    for st in ordered_all:
         formatted_stations.append({
             "id": st["id"],
             "name_he": st["name_he"],
@@ -338,12 +359,13 @@ def main():
             "lon": s["lon"],
         }
         if sid in stop_to_nearby_stations:
-            # Map of station_id -> walk_meters
             entry["st"] = {st_id: dist_m for st_id, dist_m in stop_to_nearby_stations[sid]}
         compact_stops_dict[sid] = entry
 
     output_data = {
         "generated_at": "2026-11-17",
+        "r1_polyline_ids": r1_ordered_station_ids,
+        "r2_branch_ids": r2_branch_station_ids,
         "stations": formatted_stations,
         "stops": compact_stops_dict,
         "feeder_routes": feeder_routes,
@@ -356,7 +378,7 @@ def main():
         json.dump(output_data, f, ensure_ascii=False, separators=(",", ":"))
 
     size_kb = os.path.getsize(out_path) / 1024.0
-    print(f"Successfully wrote {out_path} ({size_kb:.1f} KB)!")
+    print(f"Successfully wrote {out_path} ({size_kb:.1f} KB) with daily departure timetables!")
 
 if __name__ == "__main__":
     main()

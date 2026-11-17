@@ -15,10 +15,14 @@ export interface Translations {
   walkDirect: string;
   scooterBike: string;
   liveFeederBuses: string;
+  scheduledFeederBuses: string;
   noDirectBusesNow: string;
   walkToStop: string;
   boardLine: string;
   arrivesIn: string;
+  departsAt: string;
+  leaveAt: string;
+  arrivePlatformAt: string;
   rideDuration: string;
   alightAt: string;
   walkToStation: string;
@@ -32,74 +36,109 @@ export interface Translations {
   sortByDistance: string;
   customCoords: string;
   dataSourceFooter: string;
+  modeLeaveNow: string;
+  modeDepartAt: string;
+  modeArriveBy: string;
+  targetTimeLabel: string;
+  liveBadge: string;
+  scheduledBadge: string;
+  openInMaps: string;
+  done: string;
+  changeOrigin: string;
 }
 
 export const STRINGS: Record<Language, Translations> = {
   he: {
     appTitle: 'קל לרק"ל',
-    appSubtitle: 'הדרך המהירה ביותר לקו האדום של דנקל בגוש דן',
-    useMyGps: 'מיקום נוכחי (GPS)',
-    gpsActive: 'מתבסס על GPS',
-    presetLocations: 'או בחר נקודת מוצא לבדיקה:',
-    kStationsLabel: 'מספר תחנות דנקל להשוואה (k):',
-    refreshLive: 'רענן זמן אמת',
-    loadingLive: 'מושך נתוני אמת (SIRI)...',
-    fastestOption: 'הכי מהיר כרגע',
+    appSubtitle: 'הדרך המהירה ביותר לקו האדום של דנקל',
+    useMyGps: 'מיקום נוכחי',
+    gpsActive: 'GPS פעיל',
+    presetLocations: 'בחר נקודת מוצא בגוש דן:',
+    kStationsLabel: 'תחנות דנקל:',
+    refreshLive: 'רענן',
+    loadingLive: 'מחשב מסלולים בזמן אמת...',
+    fastestOption: 'הכי מהיר',
     underground: 'תת-קרקעית',
     surface: 'עילית',
     walkDirect: 'הליכה ישירה',
     scooterBike: 'קורקינט / אופניים',
-    liveFeederBuses: 'אוטובוסים ישירים בזמן אמת לתחנה זו:',
-    noDirectBusesNow: 'אין אוטובוס ישיר בדקות הקרובות (מומלץ הליכה / קורקינט)',
-    walkToStop: 'הליכה לתחנת האוטובוס',
-    boardLine: 'עלה על קו',
-    arrivesIn: 'מגיע בעוד',
+    liveFeederBuses: 'אוטובוסים ישירים בזמן אמת:',
+    scheduledFeederBuses: 'אוטובוסים מתוכננים לפי לו"ז:',
+    noDirectBusesNow: 'אין אוטובוס ישיר בחלון הזמן שנבחר (מומלץ הליכה / קורקינט)',
+    walkToStop: 'הליכה לתחנה',
+    boardLine: 'קו',
+    arrivesIn: 'בעוד',
+    departsAt: 'בשעה',
+    leaveAt: 'צא ב-',
+    arrivePlatformAt: 'ברציף ב-',
     rideDuration: 'נסיעה',
-    alightAt: 'רד ב-',
-    walkToStation: 'הליכה לדנקל',
-    totalTime: 'סה"כ עד הרציף',
+    alightAt: 'ירידה ב-',
+    walkToStation: 'לדנקל',
+    totalTime: 'סה"כ',
     minUnit: "דק'",
     metersUnit: "מ'",
     now: 'כעת!',
-    savesMinutes: 'חוסך ~{m} דק\' לעומת הליכה',
-    dankalFreq: 'תדירות רכבות: כל 3.5–6 דק\'',
-    sortByFastest: 'מיון: הכי מהיר',
-    sortByDistance: 'מיון: הכי קרוב',
-    customCoords: 'נקודת מוצא פעילה',
-    dataSourceFooter: 'נתוני אמת ממשרד התחבורה (GTFS + SIRI) • 100% חינם וללא פרסומות',
+    savesMinutes: 'חוסך {m} דק\'',
+    dankalFreq: 'רכבת כל 3.5–6 דק\'',
+    sortByFastest: 'הכי מהיר',
+    sortByDistance: 'הכי קרוב',
+    customCoords: 'נקודת מוצא',
+    dataSourceFooter: 'נתוני אמת ממשרד התחבורה (GTFS + SIRI)',
+    modeLeaveNow: 'צא עכשיו',
+    modeDepartAt: 'שעת יציאה',
+    modeArriveBy: 'שעת הגעה',
+    targetTimeLabel: 'זמן מבוקש:',
+    liveBadge: 'זמן אמת',
+    scheduledBadge: 'לו"ז מתוכנן',
+    openInMaps: 'נווט לתחנה',
+    done: 'סיום',
+    changeOrigin: 'החלף מוצא',
   },
   en: {
     appTitle: 'KalToRakal',
-    appSubtitle: 'Fastest live routes to the Dankal Red Line in Central Israel',
-    useMyGps: 'Use My GPS',
-    gpsActive: 'Using Live GPS',
-    presetLocations: 'Or test from a Central Israel spot:',
-    kStationsLabel: 'Nearest Dankal stations (k):',
-    refreshLive: 'Refresh Live',
-    loadingLive: 'Fetching live SIRI arrivals...',
-    fastestOption: 'Fastest Right Now',
+    appSubtitle: 'Fastest routes to the Dankal Red Line',
+    useMyGps: 'My GPS',
+    gpsActive: 'GPS Active',
+    presetLocations: 'Choose an origin in Gush Dan:',
+    kStationsLabel: 'Stations (k):',
+    refreshLive: 'Refresh',
+    loadingLive: 'Computing optimal routes...',
+    fastestOption: 'Fastest',
     underground: 'Underground',
     surface: 'Surface',
     walkDirect: 'Direct Walk',
     scooterBike: 'Scooter / Bike',
-    liveFeederBuses: 'Live direct feeder buses to this station:',
-    noDirectBusesNow: 'No direct feeder bus in the next few mins (walk/scooter recommended)',
-    walkToStop: 'Walk to bus stop',
-    boardLine: 'Take Line',
-    arrivesIn: 'Arrives in',
+    liveFeederBuses: 'Live direct feeder buses:',
+    scheduledFeederBuses: 'Scheduled direct feeder buses:',
+    noDirectBusesNow: 'No direct bus in this time window (walk/scooter recommended)',
+    walkToStop: 'Walk to stop',
+    boardLine: 'Line',
+    arrivesIn: 'In',
+    departsAt: 'At',
+    leaveAt: 'Leave',
+    arrivePlatformAt: 'On platform',
     rideDuration: 'Ride',
-    alightAt: 'Alight at',
-    walkToStation: 'Walk to Dankal',
-    totalTime: 'Total to platform',
+    alightAt: 'Alight',
+    walkToStation: 'To Dankal',
+    totalTime: 'Total',
     minUnit: 'min',
     metersUnit: 'm',
     now: 'Now!',
-    savesMinutes: 'Saves ~{m} min vs walking',
-    dankalFreq: 'Trains every 3.5–6 min',
-    sortByFastest: 'Sort: Fastest ETA',
-    sortByDistance: 'Sort: Closest Distance',
-    customCoords: 'Active Origin',
-    dataSourceFooter: 'Live Israeli MoT Data (GTFS + SIRI) • 100% Free & Open',
+    savesMinutes: 'Saves {m}m',
+    dankalFreq: 'Every 3.5–6 min',
+    sortByFastest: 'Fastest',
+    sortByDistance: 'Closest',
+    customCoords: 'Origin',
+    dataSourceFooter: 'Official Israeli MoT Data (GTFS + SIRI)',
+    modeLeaveNow: 'Leave Now',
+    modeDepartAt: 'Depart At',
+    modeArriveBy: 'Arrive By',
+    targetTimeLabel: 'Target time:',
+    liveBadge: 'LIVE',
+    scheduledBadge: 'SCHEDULED',
+    openInMaps: 'Directions',
+    done: 'Done',
+    changeOrigin: 'Change Origin',
   },
 };
 
@@ -136,7 +175,7 @@ export const PRESET_ORIGINS: PresetOrigin[] = [
   {
     id: 'givatayim',
     name_he: 'כצנלסון / ויצמן, גבעתיים',
-    name_en: 'Katznelson / Weizmann, Givatayim',
+    name_en: 'Katznelson, Givatayim',
     lat: 32.0756,
     lon: 34.8087,
   },

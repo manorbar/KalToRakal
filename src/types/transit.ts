@@ -1,5 +1,7 @@
 export type Language = 'he' | 'en';
 
+export type TimeMode = 'now' | 'depart_at' | 'arrive_by';
+
 export interface DankalStation {
   id: string;
   name_he: string;
@@ -26,10 +28,13 @@ export interface FeederRoute {
   n: string; // route_short_name (e.g. "63", "238")
   a: string; // agency_id (e.g. "5" for Dan)
   seq: [string, number][]; // [stop_id, relative_minutes][]
+  deps?: number[]; // scheduled weekday departures from stop #1 in minutes from midnight
 }
 
 export interface DankalDataset {
   generated_at: string;
+  r1_polyline_ids?: string[];
+  r2_branch_ids?: string[];
   stations: DankalStation[];
   stops: Record<string, CompactBusStop>;
   feeder_routes: Record<string, FeederRoute>;
@@ -44,18 +49,24 @@ export interface LiveBusOption {
   originStopCode: string;
   originStopNameHe: string;
   originStopNameEn: string;
+  originStopLat: number;
+  originStopLon: number;
   walkToBusMeters: number;
   walkToBusMinutes: number;
   waitMinutes: number;
-  etaFormatted: string;
+  leaveHomeFormatted: string; // HH:MM when user should start walking
+  etaFormatted: string; // HH:MM when bus arrives at origin stop
+  arriveStationFormatted: string; // HH:MM when user reaches the Dankal platform
   rideMinutes: number;
   alightStopId: string;
   alightStopNameHe: string;
   alightStopNameEn: string;
+  alightStopLat: number;
+  alightStopLon: number;
   walkFromBusMeters: number;
   walkFromBusMinutes: number;
   totalMinutes: number;
-  isRealtime: boolean;
+  isRealtime: boolean; // true = live SIRI, false = GTFS scheduled timetable
 }
 
 export interface StationRecommendation {
@@ -63,6 +74,8 @@ export interface StationRecommendation {
   aerialMeters: number;
   walkMeters: number;
   walkMinutes: number;
+  walkLeaveFormatted: string;
+  walkArriveFormatted: string;
   scooterMinutes: number;
   bestTotalMinutes: number;
   bestMode: 'bus' | 'walk';

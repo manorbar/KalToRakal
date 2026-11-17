@@ -4,6 +4,7 @@ import {
   DankalStation,
   LiveBusOption,
   StationRecommendation,
+  TimeMode,
 } from '../types/transit';
 
 const dataset = rawData as unknown as DankalDataset;
@@ -42,34 +43,60 @@ export function getAllStations(): DankalStation[] {
   return dataset.stations;
 }
 
+export function getRedLinePolylines(): {
+  r1Coords: { latitude: number; longitude: number }[];
+  r2BranchCoords: { latitude: number; longitude: number }[];
+} {
+  const stationById = new Map(dataset.stations.map((s) => [s.id, s]));
+  const r1Coords = (dataset.r1_polyline_ids || [])
+    .map((id) => stationById.get(id))
+    .filter((s): s is DankalStation => Boolean(s))
+    .map((s) => ({ latitude: s.lat, longitude: s.lon }));
+
+  const r2BranchCoords = (dataset.r2_branch_ids || [])
+    .map((id) => stationById.get(id))
+    .filter((s): s is DankalStation => Boolean(s))
+    .map((s) => ({ latitude: s.lat, longitude: s.lon }));
+
+  return { r1Coords, r2BranchCoords };
+}
+
 interface FeederMatch {
   routeId: string;
   lineName: string;
   agencyId: string;
   originStopId: string;
   originStopCode: string;
+  originOffsetMinutes: number;
   walkToBusMeters: number;
   stationId: string;
   alightStopId: string;
   walkFromBusMeters: number;
   rideMinutes: number;
+  deps: number[];
 }
 
-/**
- * Finds all direct bus connections from bus stops near the user (within maxWalkToBusMeters)
- * that travel directly to bus stops right outside any of the target Dankal stations.
- */
+function formatMinFromMidnight(totalMin: number): string {
+  const normalized = ((Math.round(totalMin) % 1440) + 1440) % 1440;
+  const hh = Math.floor(normalized / 60);
+  const mm = normalized % 60;
+  return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+}
+
+function dateToMinutesFromMidnight(d: Date): number {
+  return d.getHours() * 60 + d.getMinutes();
+}
+
 function findCandidateFeederConnections(
   userLat: number,
   userLon: number,
   targetStationIds: Set<string>,
-  maxWalkToBusMeters = 450
+  maxWalkToBusMeters = 500
 ): {
   matches: FeederMatch[];
   originStopCodesToQuery: string[];
 } {
-  // 1. Find all stops in dataset.stops within maxWalkToBusMeters of user
-  const nearbyOriginStops = new Map<string, number>(); // stopId -> walkMeters
+  const nearbyOriginStops = new Map<string, number>();
   for (const [stopId, stop] of Object.entries(dataset.stops)) {
     const d = haversineMeters(userLat, userLon, stop.lat, stop.lon);
     if (d <= maxWalkToBusMeters) {
@@ -77,13 +104,11 @@ function findCandidateFeederConnections(
     }
   }
 
-  // 2. Scan feeder_routes for routes that visit a nearbyOriginStop BEFORE a stop serving a targetStationId
   const matches: FeederMatch[] = [];
-  const originStopsWithValidRoutes = new Map<string, number>(); // stopCode -> walkMeters
+  const originStopsWithValidRoutes = new Map<string, number>();
 
   for (const [routeId, route] of Object.entries(dataset.feeder_routes)) {
     const seq = route.seq;
-    // Find earliest index where stopId is in nearbyOriginStops (closest to user)
     let bestOriginIdx = -1;
     let bestOriginDist = Infinity;
 
@@ -102,7 +127,6 @@ function findCandidateFeederConnections(
     const originStop = dataset.stops[originStopId];
     if (!originStop) continue;
 
-    // Look downstream for stops that have `st` matching any of targetStationIds
     const bestAlightPerStation = new Map<
       string,
       { alightStopId: string; walkFromBusMeters: number; rideMinutes: number }
@@ -138,11 +162,13 @@ function findCandidateFeederConnections(
         agencyId: route.a,
         originStopId,
         originStopCode: originStop.c,
+        originOffsetMinutes: originTimeMin,
         walkToBusMeters: bestOriginDist,
         stationId: stId,
         alightStopId: alight.alightStopId,
         walkFromBusMeters: alight.walkFromBusMeters,
         rideMinutes: alight.rideMinutes,
+        deps: route.deps || [],
       });
 
       const prevDist = originStopsWithValidRoutes.get(originStop.c);
@@ -152,7 +178,6 @@ function findCandidateFeederConnections(
     }
   }
 
-  // Sort unique origin stop codes by walking distance from user (query top 8 closest stops)
   const originStopCodesToQuery = Array.from(originStopsWithValidRoutes.entries())
     .sort((a, b) => a[1] - b[1])
     .slice(0, 8)
@@ -181,7 +206,7 @@ async function fetchLiveArrivalsForStopCode(
   for (const url of urls) {
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 6000);
+      const timer = setTimeout(() => controller.abort(), 5500);
       const resp = await fetch(url, {
         headers: { Accept: 'application/json' },
         signal: controller.signal,
@@ -194,34 +219,45 @@ async function fetchLiveArrivalsForStopCode(
         return visits;
       }
     } catch {
-      // Try fallback if CORS or network issue
+      // fallback
     }
   }
   return [];
 }
 
 /**
- * Core KalToRakal engine:
- * 1. Finds the k nearest Dankal Red Line stations to (userLat, userLon).
- * 2. Finds all direct feeder bus routes from stops near the user to those k stations.
- * 3. Fetches live SIRI bus arrivals in parallel for the user's nearby stops.
- * 4. Computes total door-to-platform ETA (walk to stop + live wait + ride + walk to Dankal)
- *    and compares against direct walking and bike/scooter.
+ * Supports 3 Time Modes:
+ * - 'now': Uses live MoT SIRI arrivals (`curlbus.app`) with GTFS timetable fallback.
+ * - 'depart_at': Computes optimal routes starting at `targetDate` (live SIRI if within 25 min of now, else GTFS schedule).
+ * - 'arrive_by': Works backwards from `targetDate` so the user reaches the Dankal platform on or before `targetDate`.
  */
 export async function computeRoutesToNearestDankalStations(
   userLat: number,
   userLon: number,
-  k: number = 3
+  k: number = 3,
+  timeMode: TimeMode = 'now',
+  targetDate: Date = new Date()
 ): Promise<StationRecommendation[]> {
-  // 1. Rank all 34 Dankal stations by distance from user
+  const now = new Date();
+  const effectiveDate = timeMode === 'now' ? now : targetDate;
+  const targetMinOfDay = dateToMinutesFromMidnight(effectiveDate);
+  const diffFromNowMinutes = (effectiveDate.getTime() - now.getTime()) / 60000;
+
+  // Use live SIRI if mode is 'now' or if target departure is within the next 20 minutes
+  const useLiveSiri =
+    timeMode === 'now' ||
+    (timeMode === 'depart_at' &&
+      diffFromNowMinutes >= -3 &&
+      diffFromNowMinutes <= 20);
+
   const stationsWithDist = dataset.stations
     .map((station) => {
       const aerialMeters = Math.round(
         haversineMeters(userLat, userLon, station.lat, station.lon)
       );
-      const walkMeters = Math.round(aerialMeters * 1.28); // urban street grid factor
-      const walkMinutes = Math.max(1, Math.round(walkMeters / 80)); // 4.8 km/h walking speed
-      const scooterMinutes = Math.max(1, Math.round(walkMeters / 250)); // 15 km/h scooter/bike speed
+      const walkMeters = Math.round(aerialMeters * 1.28);
+      const walkMinutes = Math.max(1, Math.round(walkMeters / 80));
+      const scooterMinutes = Math.max(1, Math.round(walkMeters / 250));
       return {
         station,
         aerialMeters,
@@ -235,7 +271,6 @@ export async function computeRoutesToNearestDankalStations(
   const nearestK = stationsWithDist.slice(0, k);
   const targetStationIds = new Set(nearestK.map((item) => item.station.id));
 
-  // 2. Find candidate feeder bus routes & stops near the user
   const { matches, originStopCodesToQuery } = findCandidateFeederConnections(
     userLat,
     userLon,
@@ -243,18 +278,16 @@ export async function computeRoutesToNearestDankalStations(
     500
   );
 
-  // 3. Query live SIRI arrivals for the relevant nearby bus stops in parallel
   const liveVisitsByStopCode = new Map<string, CurlbusVisit[]>();
-  await Promise.all(
-    originStopCodesToQuery.map(async (code) => {
-      const visits = await fetchLiveArrivalsForStopCode(code);
-      liveVisitsByStopCode.set(code, visits);
-    })
-  );
+  if (useLiveSiri) {
+    await Promise.all(
+      originStopCodesToQuery.map(async (code) => {
+        const visits = await fetchLiveArrivalsForStopCode(code);
+        liveVisitsByStopCode.set(code, visits);
+      })
+    );
+  }
 
-  const nowMs = Date.now();
-
-  // 4. Build live route options for each of the k stations
   return nearestK.map((item) => {
     const { station, aerialMeters, walkMeters, walkMinutes, scooterMinutes } =
       item;
@@ -264,7 +297,6 @@ export async function computeRoutesToNearestDankalStations(
     const seenOptionKeys = new Set<string>();
 
     for (const m of stationMatches) {
-      const visits = liveVisitsByStopCode.get(m.originStopCode) || [];
       const originStop = dataset.stops[m.originStopId];
       const alightStop = dataset.stops[m.alightStopId];
       if (!originStop || !alightStop) continue;
@@ -278,66 +310,152 @@ export async function computeRoutesToNearestDankalStations(
         Math.round((m.walkFromBusMeters * 1.2) / 80)
       );
 
-      // Match live SIRI visits by route_id OR by line_name (in case GTFS route_id rotated for another variant of same line)
-      for (const v of visits) {
-        const isExactRoute = String(v.route_id) === m.routeId;
-        const isSameLineAndAgency =
-          String(v.line_name) === m.lineName &&
-          String(v.operator_id) === m.agencyId;
+      const agency = AGENCY_NAMES[m.agencyId] || {
+        he: 'תחבורה ציבורית',
+        en: 'Public Transit',
+      };
 
-        if (!isExactRoute && !isSameLineAndAgency) continue;
+      // 1. Live SIRI arrivals (if in live window)
+      if (useLiveSiri) {
+        const visits = liveVisitsByStopCode.get(m.originStopCode) || [];
+        for (const v of visits) {
+          const isExactRoute = String(v.route_id) === m.routeId;
+          const isSameLineAndAgency =
+            String(v.line_name) === m.lineName &&
+            String(v.operator_id) === m.agencyId;
+          if (!isExactRoute && !isSameLineAndAgency) continue;
 
-        const etaDate = new Date(v.eta.replace(' ', 'T'));
-        const waitMinRaw = Math.round((etaDate.getTime() - nowMs) / 60000);
+          const etaDate = new Date(v.eta.replace(' ', 'T'));
+          const waitMinRaw = Math.round(
+            (etaDate.getTime() - effectiveDate.getTime()) / 60000
+          );
+          if (waitMinRaw < walkToBusMinutes - 1 || waitMinRaw > 45) continue;
 
-        // Ensure the user can actually walk to the bus stop before the bus departs (allow 1 min grace)
-        if (waitMinRaw < walkToBusMinutes - 1 || waitMinRaw > 45) continue;
+          const waitMinutes = Math.max(0, waitMinRaw);
+          const busArrivalMinOfDay = dateToMinutesFromMidnight(etaDate);
+          const leaveHomeMinOfDay = busArrivalMinOfDay - walkToBusMinutes;
+          const arriveStationMinOfDay =
+            busArrivalMinOfDay + m.rideMinutes + walkFromBusMinutes;
+          const totalMinutes =
+            Math.max(walkToBusMinutes, waitMinutes) +
+            m.rideMinutes +
+            walkFromBusMinutes;
 
-        const waitMinutes = Math.max(0, waitMinRaw);
-        const totalMinutes =
-          Math.max(walkToBusMinutes, waitMinutes) +
-          m.rideMinutes +
-          walkFromBusMinutes;
+          const etaHHMM = v.eta.slice(11, 16);
+          const dedupKey = `${m.lineName}_${etaHHMM}`;
+          if (seenOptionKeys.has(dedupKey)) continue;
+          seenOptionKeys.add(dedupKey);
 
-        const etaHHMM = v.eta.slice(11, 16);
-        const dedupKey = `${m.lineName}_${etaHHMM}_${m.originStopCode}`;
-        if (seenOptionKeys.has(dedupKey)) continue;
-        seenOptionKeys.add(dedupKey);
+          liveBusOptions.push({
+            id: `${dedupKey}_${m.originStopCode}`,
+            lineName: m.lineName,
+            agencyNameHe: agency.he,
+            agencyNameEn: agency.en,
+            originStopId: m.originStopId,
+            originStopCode: m.originStopCode,
+            originStopNameHe: originStop.he,
+            originStopNameEn: originStop.en,
+            originStopLat: originStop.lat,
+            originStopLon: originStop.lon,
+            walkToBusMeters: m.walkToBusMeters,
+            walkToBusMinutes,
+            waitMinutes,
+            leaveHomeFormatted: formatMinFromMidnight(leaveHomeMinOfDay),
+            etaFormatted: etaHHMM,
+            arriveStationFormatted: formatMinFromMidnight(
+              arriveStationMinOfDay
+            ),
+            rideMinutes: m.rideMinutes,
+            alightStopId: m.alightStopId,
+            alightStopNameHe: alightStop.he,
+            alightStopNameEn: alightStop.en,
+            alightStopLat: alightStop.lat,
+            alightStopLon: alightStop.lon,
+            walkFromBusMeters: m.walkFromBusMeters,
+            walkFromBusMinutes,
+            totalMinutes,
+            isRealtime: true,
+          });
+        }
+      }
 
-        const agency = AGENCY_NAMES[m.agencyId] || {
-          he: 'תחבורה ציבורית',
-          en: 'Public Transit',
-        };
+      // 2. Scheduled GTFS timetable calculation (used for 'depart_at', 'arrive_by', or fallback when no live SIRI)
+      if (!useLiveSiri || liveBusOptions.length === 0) {
+        for (const depMin of m.deps) {
+          const busAtOriginMin = Math.round(depMin + m.originOffsetMinutes);
+          const arriveStationMin =
+            busAtOriginMin + m.rideMinutes + walkFromBusMinutes;
+          const leaveHomeMin = busAtOriginMin - walkToBusMinutes;
 
-        liveBusOptions.push({
-          id: dedupKey,
-          lineName: m.lineName,
-          agencyNameHe: agency.he,
-          agencyNameEn: agency.en,
-          originStopId: m.originStopId,
-          originStopCode: m.originStopCode,
-          originStopNameHe: originStop.he,
-          originStopNameEn: originStop.en,
-          walkToBusMeters: m.walkToBusMeters,
-          walkToBusMinutes,
-          waitMinutes,
-          etaFormatted: etaHHMM,
-          rideMinutes: m.rideMinutes,
-          alightStopId: m.alightStopId,
-          alightStopNameHe: alightStop.he,
-          alightStopNameEn: alightStop.en,
-          walkFromBusMeters: m.walkFromBusMeters,
-          walkFromBusMinutes,
-          totalMinutes,
-          isRealtime: true,
-        });
+          if (timeMode === 'arrive_by') {
+            // Must arrive at the Dankal station on or before targetMinOfDay, and at most 45 mins before
+            const earlyMargin = targetMinOfDay - arriveStationMin;
+            if (earlyMargin < 0 || earlyMargin > 45) continue;
+          } else {
+            // 'depart_at' or fallback 'now': user leaves at or after targetMinOfDay
+            const waitMin = busAtOriginMin - targetMinOfDay;
+            if (waitMin < walkToBusMinutes - 1 || waitMin > 45) continue;
+          }
+
+          const waitMinutes =
+            timeMode === 'arrive_by'
+              ? Math.max(0, targetMinOfDay - arriveStationMin)
+              : Math.max(0, busAtOriginMin - targetMinOfDay);
+
+          const totalMinutes =
+            timeMode === 'arrive_by'
+              ? walkToBusMinutes + m.rideMinutes + walkFromBusMinutes
+              : Math.max(walkToBusMinutes, waitMinutes) +
+                m.rideMinutes +
+                walkFromBusMinutes;
+
+          const etaHHMM = formatMinFromMidnight(busAtOriginMin);
+          const dedupKey = `${m.lineName}_${etaHHMM}`;
+          if (seenOptionKeys.has(dedupKey)) continue;
+          seenOptionKeys.add(dedupKey);
+
+          liveBusOptions.push({
+            id: `${dedupKey}_${m.originStopCode}_sched`,
+            lineName: m.lineName,
+            agencyNameHe: agency.he,
+            agencyNameEn: agency.en,
+            originStopId: m.originStopId,
+            originStopCode: m.originStopCode,
+            originStopNameHe: originStop.he,
+            originStopNameEn: originStop.en,
+            originStopLat: originStop.lat,
+            originStopLon: originStop.lon,
+            walkToBusMeters: m.walkToBusMeters,
+            walkToBusMinutes,
+            waitMinutes,
+            leaveHomeFormatted: formatMinFromMidnight(leaveHomeMin),
+            etaFormatted: etaHHMM,
+            arriveStationFormatted: formatMinFromMidnight(arriveStationMin),
+            rideMinutes: m.rideMinutes,
+            alightStopId: m.alightStopId,
+            alightStopNameHe: alightStop.he,
+            alightStopNameEn: alightStop.en,
+            alightStopLat: alightStop.lat,
+            alightStopLon: alightStop.lon,
+            walkFromBusMeters: m.walkFromBusMeters,
+            walkFromBusMinutes,
+            totalMinutes,
+            isRealtime: false,
+          });
+        }
       }
     }
 
-    // Sort live bus options by earliest total arrival time on the Dankal platform
-    liveBusOptions.sort((a, b) => a.totalMinutes - b.totalMinutes);
-    const topBusOptions = liveBusOptions.slice(0, 4);
+    if (timeMode === 'arrive_by') {
+      // For 'arrive_by', sort by latest departure from home that still makes the target arrival time!
+      liveBusOptions.sort((a, b) =>
+        b.leaveHomeFormatted.localeCompare(a.leaveHomeFormatted)
+      );
+    } else {
+      liveBusOptions.sort((a, b) => a.totalMinutes - b.totalMinutes);
+    }
 
+    const topBusOptions = liveBusOptions.slice(0, 4);
     const bestBusMin =
       topBusOptions.length > 0 ? topBusOptions[0].totalMinutes : Infinity;
     const bestTotalMinutes = Math.min(walkMinutes, bestBusMin);
@@ -346,7 +464,15 @@ export async function computeRoutesToNearestDankalStations(
     const minutesSavedByBus =
       bestMode === 'bus' ? Math.max(0, walkMinutes - bestBusMin) : 0;
 
-    // Shared trunk (Ben Gurion <-> Elifelet) has R1+R2+R3 every ~3.5 mins; branches every ~6 mins
+    const walkLeaveFormatted =
+      timeMode === 'arrive_by'
+        ? formatMinFromMidnight(targetMinOfDay - walkMinutes)
+        : formatMinFromMidnight(targetMinOfDay);
+    const walkArriveFormatted =
+      timeMode === 'arrive_by'
+        ? formatMinFromMidnight(targetMinOfDay)
+        : formatMinFromMidnight(targetMinOfDay + walkMinutes);
+
     const nextTrainHeadwayMin =
       station.lines.length >= 2 ? '3.5–5' : '5–7';
 
@@ -355,6 +481,8 @@ export async function computeRoutesToNearestDankalStations(
       aerialMeters,
       walkMeters,
       walkMinutes,
+      walkLeaveFormatted,
+      walkArriveFormatted,
       scooterMinutes,
       bestTotalMinutes,
       bestMode,
