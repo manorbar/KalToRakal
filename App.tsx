@@ -15,6 +15,7 @@ import {
   Animated,
   PanResponder,
   Vibration,
+  ViewProps,
 } from 'react-native';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import DateTimePicker, {
@@ -22,6 +23,8 @@ import DateTimePicker, {
 } from '@react-native-community/datetimepicker';
 import SegmentedControl from '@react-native-segmented-control/segmented-control';
 import { BlurView } from 'expo-blur';
+import { GlassView, isLiquidGlassAvailable } from 'expo-glass-effect';
+import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
@@ -43,7 +46,6 @@ import {
   haversineMeters,
 } from './src/services/routingEngine';
 
-// Configure foreground push notifications so get-off alerts pop up with sound & banner even while app is open
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
@@ -58,9 +60,64 @@ const NativeSegmentedControl =
   SegmentedControl as unknown as React.ComponentType<any>;
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
-const SHEET_COLLAPSED_HEIGHT = 135;
+const SHEET_COLLAPSED_HEIGHT = 132;
 const SHEET_DEFAULT_HEIGHT = Math.round(SCREEN_HEIGHT * 0.55);
 const SHEET_EXPANDED_HEIGHT = Math.round(SCREEN_HEIGHT * 0.82);
+
+const HAS_NATIVE_LIQUID_GLASS =
+  Platform.OS === 'ios' &&
+  typeof isLiquidGlassAvailable === 'function' &&
+  isLiquidGlassAvailable();
+
+/**
+ * Reusable iOS Liquid Glass Surface:
+ * Uses Apple's native iOS 26 `UIGlassEffect` (`GlassView`) when available,
+ * and falls back to `UIVisualEffectView` (`systemUltraThinMaterialDark`) with specular rim highlights.
+ */
+function LiquidGlassCard({
+  children,
+  style,
+  intensity = 65,
+  interactive = false,
+}: {
+  children: React.ReactNode;
+  style?: ViewProps['style'];
+  intensity?: number;
+  interactive?: boolean;
+}) {
+  if (HAS_NATIVE_LIQUID_GLASS) {
+    return (
+      <GlassView
+        glassEffectStyle="regular"
+        colorScheme="dark"
+        isInteractive={interactive}
+        style={[styles.liquidGlassBase, style]}
+      >
+        {children}
+      </GlassView>
+    );
+  }
+  return (
+    <BlurView
+      intensity={intensity}
+      tint="systemUltraThinMaterialDark"
+      style={[styles.liquidGlassBase, styles.liquidGlassFallback, style]}
+    >
+      <LinearGradient
+        colors={[
+          'rgba(255, 255, 255, 0.14)',
+          'rgba(255, 255, 255, 0.03)',
+          'rgba(255, 255, 255, 0.0)',
+        ]}
+        start={{ x: 0.1, y: 0 }}
+        end={{ x: 0.9, y: 1 }}
+        style={StyleSheet.absoluteFill}
+        pointerEvents="none"
+      />
+      {children}
+    </BlurView>
+  );
+}
 
 export default function App() {
   const mapRef = useRef<MapView | null>(null);
@@ -88,12 +145,10 @@ export default function App() {
 
   // Live Route Progress & Get-Off Alert State
   const [isTrackingRide, setIsTrackingRide] = useState<boolean>(false);
-  const [isSimulatingRide, setIsSimulatingRide] = useState<boolean>(false);
   const [liveUserCoords, setLiveUserCoords] = useState<{
     lat: number;
     lon: number;
   } | null>(null);
-  // currentStopIndex: -1 = walking to boarding stop, 0..N-1 = index in intermediateStops, N = reached Dankal
   const [currentStopIndex, setCurrentStopIndex] = useState<number>(-1);
   const [activeAlertBanner, setActiveAlertBanner] = useState<{
     level: 'prepare' | 'get_off' | 'done';
@@ -102,7 +157,6 @@ export default function App() {
   } | null>(null);
 
   const locationSubRef = useRef<Location.LocationSubscription | null>(null);
-  const simIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const firedAlertsRef = useRef<{
     prepareFired: boolean;
     getOffFired: boolean;
@@ -270,12 +324,7 @@ export default function App() {
       locationSubRef.current.remove();
       locationSubRef.current = null;
     }
-    if (simIntervalRef.current) {
-      clearInterval(simIntervalRef.current);
-      simIntervalRef.current = null;
-    }
     setIsTrackingRide(false);
-    setIsSimulatingRide(false);
     setLiveUserCoords(null);
     setCurrentStopIndex(-1);
     setActiveAlertBanner(null);
@@ -292,12 +341,6 @@ export default function App() {
     };
   }, [stopAllTracking]);
 
-  /**
-   * Evaluates live user coordinates against the selected route's stops and triggers:
-   * - "Get Ready! Next stop is yours" (1 stop before exit)
-   * - "Get Off Now!" (within 170m of alighting stop)
-   * - "Arrived at Dankal Station!" (within 90m of Dankal station)
-   */
   const evaluateRouteProgress = useCallback(
     (lat: number, lon: number, journey: SelectedJourney) => {
       setLiveUserCoords({ lat, lon });
@@ -309,7 +352,6 @@ export default function App() {
         const stops = bus.intermediateStops;
         const alightName = isRTL ? bus.alightStopNameHe : bus.alightStopNameEn;
 
-        // Check distance to Dankal station itself
         const distToDankal = haversineMeters(
           lat,
           lon,
@@ -317,7 +359,6 @@ export default function App() {
           rec.station.lon
         );
 
-        // Find closest stop along [originStop, ...intermediateStops]
         let closestIdx = -1;
         let minStopDist = haversineMeters(
           lat,
@@ -344,7 +385,6 @@ export default function App() {
           bus.alightStopLon
         );
 
-        // 1. Check if 1 stop before alighting stop ("Prepare to get off!")
         if (
           lastStopIdx >= 1 &&
           closestIdx === lastStopIdx - 1 &&
@@ -361,7 +401,6 @@ export default function App() {
           fireLocalNotification(title, body);
         }
 
-        // 2. Check if arrived at alighting stop ("Get Off Now!")
         if (
           (closestIdx === lastStopIdx || distToAlight <= 170) &&
           !firedAlertsRef.current.getOffFired
@@ -379,7 +418,6 @@ export default function App() {
           fireLocalNotification(title, body);
         }
 
-        // 3. Check if reached the Dankal station entrance
         if (
           distToDankal <= 85 &&
           firedAlertsRef.current.getOffFired &&
@@ -393,7 +431,6 @@ export default function App() {
           fireLocalNotification(title, body);
         }
       } else {
-        // Walking / Scooter direct mode
         const distToDankal = haversineMeters(
           lat,
           lon,
@@ -413,9 +450,6 @@ export default function App() {
     [fireLocalNotification, isRTL, t]
   );
 
-  /**
-   * Starts real live GPS tracking (`watchPositionAsync`) + requests notification permissions
-   */
   const handleStartLiveTracking = async () => {
     if (!selectedJourney) return;
     stopAllTracking();
@@ -424,7 +458,7 @@ export default function App() {
     try {
       await Notifications.requestPermissionsAsync();
     } catch {
-      // ignore if unsupported
+      // ignore
     }
 
     const { status } = await Location.requestForegroundPermissionsAsync();
@@ -458,86 +492,56 @@ export default function App() {
   };
 
   /**
-   * Interactive Demo / Simulation mode: steps the live bus/user position along each stop
-   * every 2.2 seconds so you can test the live progress bar, camera follow, and get-off alerts right now!
+   * Smart Map Framing:
+   * Fits the user origin + ALL k nearest Dankal stations in the visible upper map viewport
+   * with generous padding so station pins don't overlap each other!
    */
-  const handleSimulateRide = async () => {
-    if (!selectedJourney) return;
-    stopAllTracking();
-    triggerHaptic('light');
-
-    try {
-      await Notifications.requestPermissionsAsync();
-    } catch {
-      // ignore
-    }
-
-    setIsTrackingRide(true);
-    setIsSimulatingRide(true);
-    setShowIntermediateStops(true);
-
-    const rec = selectedJourney.recommendation;
-    const waypoints: { lat: number; lon: number }[] = [];
-
-    if (selectedJourney.mode === 'bus' && selectedJourney.busOption) {
-      const bus = selectedJourney.busOption;
-      waypoints.push({ lat: bus.originStopLat, lon: bus.originStopLon });
-      for (const s of bus.intermediateStops) {
-        waypoints.push({ lat: s.lat, lon: s.lon });
-      }
-      waypoints.push({ lat: rec.station.lat, lon: rec.station.lon });
-    } else {
-      waypoints.push({ lat: activeOrigin.lat, lon: activeOrigin.lon });
-      waypoints.push({
-        lat: (activeOrigin.lat + rec.station.lat) / 2,
-        lon: (activeOrigin.lon + rec.station.lon) / 2,
-      });
-      waypoints.push({ lat: rec.station.lat, lon: rec.station.lon });
-    }
-
-    let stepIdx = 0;
-    evaluateRouteProgress(
-      waypoints[0].lat,
-      waypoints[0].lon,
-      selectedJourney
-    );
-
-    simIntervalRef.current = setInterval(() => {
-      stepIdx += 1;
-      if (stepIdx >= waypoints.length) {
-        if (simIntervalRef.current) {
-          clearInterval(simIntervalRef.current);
-          simIntervalRef.current = null;
-        }
-        setIsSimulatingRide(false);
-        return;
-      }
-      const pt = waypoints[stepIdx];
-      evaluateRouteProgress(pt.lat, pt.lon, selectedJourney);
-      if (mapRef.current) {
-        mapRef.current.animateCamera(
-          {
-            center: { latitude: pt.lat - 0.003, longitude: pt.lon },
-          },
-          { duration: 600 }
-        );
-      }
-    }, 2200);
-  };
-
-  const focusMapOnOriginAndStation = useCallback(
-    (origLat: number, origLon: number, stLat: number, stLon: number) => {
+  const fitMapToStations = useCallback(
+    (
+      origLat: number,
+      origLon: number,
+      recs: StationRecommendation[],
+      focusSingleStation?: { lat: number; lon: number }
+    ) => {
       if (!mapRef.current) return;
-      const midLat = (origLat + stLat) / 2;
-      const midLon = (origLon + stLon) / 2;
-      const latDelta = Math.max(0.014, Math.abs(origLat - stLat) * 2.1);
-      const lonDelta = Math.max(0.014, Math.abs(origLon - stLon) * 2.1);
+      const points = [
+        { latitude: origLat, longitude: origLon },
+        ...(focusSingleStation
+          ? [
+              {
+                latitude: focusSingleStation.lat,
+                longitude: focusSingleStation.lon,
+              },
+            ]
+          : recs.map((r) => ({
+              latitude: r.station.lat,
+              longitude: r.station.lon,
+            }))),
+      ];
+      if (points.length < 2) return;
+
+      let minLat = Infinity,
+        maxLat = -Infinity,
+        minLon = Infinity,
+        maxLon = -Infinity;
+      for (const p of points) {
+        if (p.latitude < minLat) minLat = p.latitude;
+        if (p.latitude > maxLat) maxLat = p.latitude;
+        if (p.longitude < minLon) minLon = p.longitude;
+        if (p.longitude > maxLon) maxLon = p.longitude;
+      }
+
+      const latSpan = Math.max(0.016, (maxLat - minLat) * 1.65);
+      const lonSpan = Math.max(0.018, (maxLon - minLon) * 1.65);
+      const centerLat = (minLat + maxLat) / 2 - latSpan * 0.22;
+      const centerLon = (minLon + maxLon) / 2;
+
       mapRef.current.animateToRegion(
         {
-          latitude: midLat - latDelta * 0.18,
-          longitude: midLon,
-          latitudeDelta: latDelta,
-          longitudeDelta: lonDelta,
+          latitude: centerLat,
+          longitude: centerLon,
+          latitudeDelta: latSpan,
+          longitudeDelta: lonSpan,
         },
         450
       );
@@ -570,12 +574,7 @@ export default function App() {
             cur.bestTotalMinutes < best.bestTotalMinutes ? cur : best
           );
           setSelectedStationId(fastest.station.id);
-          focusMapOnOriginAndStation(
-            lat,
-            lon,
-            fastest.station.lat,
-            fastest.station.lon
-          );
+          fitMapToStations(lat, lon, res);
         }
         const now = new Date();
         setLastUpdated(
@@ -590,7 +589,7 @@ export default function App() {
         setLoading(false);
       }
     },
-    [focusMapOnOriginAndStation]
+    [fitMapToStations]
   );
 
   useEffect(() => {
@@ -734,12 +733,10 @@ export default function App() {
     if (sheetSnap === 'collapsed') {
       snapSheetTo('default');
     }
-    focusMapOnOriginAndStation(
-      activeOrigin.lat,
-      activeOrigin.lon,
-      rec.station.lat,
-      rec.station.lon
-    );
+    fitMapToStations(activeOrigin.lat, activeOrigin.lon, recommendations, {
+      lat: rec.station.lat,
+      lon: rec.station.lon,
+    });
   };
 
   const formatUrgencyBadge = (bus: LiveBusOption): {
@@ -756,7 +753,7 @@ export default function App() {
           String(Math.max(2, bus.spareMinutesToWalk))
         )}`,
         bg: 'rgba(16, 185, 129, 0.16)',
-        border: 'rgba(16, 185, 129, 0.45)',
+        border: 'rgba(52, 211, 153, 0.45)',
         text: '#6EE7B7',
       };
     }
@@ -764,14 +761,14 @@ export default function App() {
       return {
         label: `🟡 ${t.urgencyLeaveNow}`,
         bg: 'rgba(245, 158, 11, 0.18)',
-        border: 'rgba(245, 158, 11, 0.5)',
+        border: 'rgba(251, 191, 36, 0.5)',
         text: '#FCD34D',
       };
     }
     return {
       label: `🔴 ${t.urgencyBrisk}`,
       bg: 'rgba(239, 68, 68, 0.2)',
-      border: 'rgba(239, 68, 68, 0.55)',
+      border: 'rgba(248, 113, 113, 0.55)',
       text: '#FCA5A5',
     };
   };
@@ -870,14 +867,14 @@ export default function App() {
         {r1Coords.length > 1 && (
           <Polyline
             coordinates={r1Coords}
-            strokeColor="#EF4444"
+            strokeColor="#FF453A"
             strokeWidth={4}
           />
         )}
         {r2BranchCoords.length > 1 && (
           <Polyline
             coordinates={r2BranchCoords}
-            strokeColor="#F87171"
+            strokeColor="#FF6961"
             strokeWidth={3.5}
           />
         )}
@@ -899,6 +896,7 @@ export default function App() {
           );
         })}
 
+        {/* Compact Single-Line Pill Markers for the k Nearest Stations */}
         {recommendations.map((rec) => {
           const isFastest = rec.station.id === overallFastestStationId;
           const isSelected = rec.station.id === selectedStationId;
@@ -910,14 +908,15 @@ export default function App() {
                 latitude: rec.station.lat,
                 longitude: rec.station.lon,
               }}
+              zIndex={isSelected ? 30 : isFastest ? 20 : 10}
               onPress={() => {
                 triggerHaptic('selection');
                 setSelectedStationId(rec.station.id);
-                focusMapOnOriginAndStation(
+                fitMapToStations(
                   activeOrigin.lat,
                   activeOrigin.lon,
-                  rec.station.lat,
-                  rec.station.lon
+                  recommendations,
+                  { lat: rec.station.lat, lon: rec.station.lon }
                 );
               }}
             >
@@ -926,6 +925,7 @@ export default function App() {
                   styles.stationMapPin,
                   isFastest && styles.stationMapPinFastest,
                   isSelected && styles.stationMapPinSelected,
+                  { flexDirection: rowDir },
                 ]}
               >
                 <Text style={styles.stationMapPinName} numberOfLines={1}>
@@ -938,7 +938,7 @@ export default function App() {
                   ]}
                 >
                   <Text style={styles.stationMapPinEtaText}>
-                    {rec.bestTotalMinutes} {t.minUnit}
+                    {rec.bestTotalMinutes}'
                   </Text>
                 </View>
               </View>
@@ -1024,7 +1024,7 @@ export default function App() {
                       longitude: activeMapBusOption.originStopLon,
                     },
                   ]}
-                  strokeColor="#60A5FA"
+                  strokeColor="#64D2FF"
                   strokeWidth={3.5}
                   lineDashPattern={[6, 6]}
                 />
@@ -1040,7 +1040,7 @@ export default function App() {
                       longitude: s.lon,
                     })),
                   ]}
-                  strokeColor="#3B82F6"
+                  strokeColor="#0A84FF"
                   strokeWidth={5}
                 />
 
@@ -1055,7 +1055,7 @@ export default function App() {
                       longitude: selectedStationRec.station.lon,
                     },
                   ]}
-                  strokeColor="#10B981"
+                  strokeColor="#30D158"
                   strokeWidth={3.5}
                   lineDashPattern={[5, 5]}
                 />
@@ -1069,7 +1069,7 @@ export default function App() {
                     longitude: selectedStationRec.station.lon,
                   },
                 ]}
-                strokeColor="#10B981"
+                strokeColor="#30D158"
                 strokeWidth={4}
                 lineDashPattern={[6, 6]}
               />
@@ -1078,9 +1078,9 @@ export default function App() {
         )}
       </MapView>
 
-      {/* 2. Floating Native Frosted-Glass Top Overlay */}
+      {/* 2. Floating iOS Liquid Glass Top Card */}
       <SafeAreaView style={styles.topFloatingSafe} pointerEvents="box-none">
-        <BlurView intensity={85} tint="dark" style={styles.topBlurCard}>
+        <LiquidGlassCard intensity={60} style={styles.topGlassCard}>
           <View style={[styles.topHeaderRow, { flexDirection: rowDir }]}>
             <TouchableOpacity
               style={[styles.originSelectorBtn, { flexDirection: rowDir }]}
@@ -1093,7 +1093,7 @@ export default function App() {
               <Ionicons
                 name={activeOrigin.isGps ? 'navigate-circle' : 'location'}
                 size={20}
-                color="#3B82F6"
+                color="#0A84FF"
               />
               <View
                 style={{
@@ -1109,23 +1109,27 @@ export default function App() {
                   {isRTL ? activeOrigin.name_he : activeOrigin.name_en}
                 </Text>
               </View>
-              <Ionicons name="chevron-down" size={15} color="#9CA3AF" />
+              <Ionicons
+                name="chevron-down"
+                size={15}
+                color="rgba(255,255,255,0.55)"
+              />
             </TouchableOpacity>
 
             <TouchableOpacity
-              style={styles.gpsQuickBtn}
+              style={styles.glassCircleIconBtn}
               onPress={handleUseMyGps}
               activeOpacity={0.75}
             >
               <Ionicons
                 name="locate"
                 size={18}
-                color={activeOrigin.isGps ? '#60A5FA' : '#E5E7EB'}
+                color={activeOrigin.isGps ? '#64D2FF' : '#F8FAFC'}
               />
             </TouchableOpacity>
 
             <TouchableOpacity
-              style={styles.langPillBtn}
+              style={styles.glassLangBtn}
               onPress={() => {
                 triggerHaptic('selection');
                 setLang((prev) => (prev === 'he' ? 'en' : 'he'));
@@ -1138,15 +1142,8 @@ export default function App() {
             </TouchableOpacity>
           </View>
 
-          {/* Direction Filter Pills */}
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={[
-              styles.directionScrollRow,
-              { flexDirection: rowDir },
-            ]}
-          >
+          {/* Non-Scrolling 4-Pill Direction Bar (No Clipped Text!) */}
+          <View style={[styles.directionBarRow, { flexDirection: rowDir }]}>
             {directionOptions.map((opt) => {
               const active = direction === opt.id;
               return (
@@ -1160,19 +1157,23 @@ export default function App() {
                     triggerHaptic('selection');
                     setDirection(opt.id);
                   }}
+                  activeOpacity={0.8}
                 >
                   <Text
                     style={[
                       styles.directionChipText,
                       active && styles.directionChipTextActive,
                     ]}
+                    numberOfLines={1}
+                    adjustsFontSizeToFit
+                    minimumFontScale={0.82}
                   >
                     {opt.label}
                   </Text>
                 </TouchableOpacity>
               );
             })}
-          </ScrollView>
+          </View>
 
           {/* Native Segmented Control: Leave Now | Depart At | Arrive By */}
           <View style={styles.segmentedWrapper}>
@@ -1185,8 +1186,8 @@ export default function App() {
                 handleTimeModeChange(event.nativeEvent.selectedSegmentIndex);
               }}
               appearance="dark"
-              tintColor="#3B82F6"
-              fontStyle={{ color: '#D1D5DB', fontSize: 12, fontWeight: '600' }}
+              tintColor="#0A84FF"
+              fontStyle={{ color: '#E2E8F0', fontSize: 12, fontWeight: '600' }}
               activeFontStyle={{
                 color: '#FFFFFF',
                 fontSize: 12,
@@ -1201,7 +1202,7 @@ export default function App() {
               <View
                 style={[styles.timePickerLabelGroup, { flexDirection: rowDir }]}
               >
-                <Ionicons name="calendar-outline" size={16} color="#60A5FA" />
+                <Ionicons name="calendar-outline" size={16} color="#64D2FF" />
                 <Text style={styles.timePickerLabel}>
                   {timeMode === 'depart_at' ? t.modeDepartAt : t.modeArriveBy}:
                 </Text>
@@ -1262,11 +1263,12 @@ export default function App() {
               onChange={handleTimePickerChange}
             />
           )}
-        </BlurView>
+        </LiquidGlassCard>
 
-        {/* Live Get-Off Alert Floating Banner (Prepare / Get Off Now / Arrived) */}
+        {/* Live Get-Off Alert Floating Banner */}
         {activeAlertBanner && (
-          <View
+          <LiquidGlassCard
+            intensity={80}
             style={[
               styles.getOffAlertCard,
               activeAlertBanner.level === 'prepare' &&
@@ -1281,15 +1283,15 @@ export default function App() {
             <Text style={[styles.getOffAlertBody, { textAlign }]}>
               {activeAlertBanner.body}
             </Text>
-          </View>
+          </LiquidGlassCard>
         )}
       </SafeAreaView>
 
-      {/* 3. Interactive Collapsible / Draggable Native Bottom Sheet */}
+      {/* 3. Interactive Collapsible / Draggable iOS Liquid Glass Bottom Sheet */}
       <Animated.View
         style={[styles.bottomSheetContainer, { height: sheetHeightAnim }]}
       >
-        <BlurView intensity={94} tint="dark" style={styles.bottomSheetBlur}>
+        <LiquidGlassCard intensity={75} style={styles.bottomSheetGlass}>
           {/* Draggable & Tappable Grabber Zone */}
           <View {...panResponder.panHandlers} style={styles.grabberTouchArea}>
             <View style={styles.sheetGrabber} />
@@ -1302,8 +1304,8 @@ export default function App() {
                 name={
                   sheetSnap === 'collapsed' ? 'chevron-up' : 'chevron-down'
                 }
-                size={15}
-                color="#9CA3AF"
+                size={16}
+                color="rgba(255,255,255,0.6)"
               />
             </TouchableOpacity>
           </View>
@@ -1327,7 +1329,7 @@ export default function App() {
                   <Ionicons
                     name={isRTL ? 'chevron-forward' : 'chevron-back'}
                     size={16}
-                    color="#60A5FA"
+                    color="#64D2FF"
                   />
                   <Text style={styles.backBtnText}>{t.backToStations}</Text>
                 </TouchableOpacity>
@@ -1353,93 +1355,69 @@ export default function App() {
                 contentContainerStyle={styles.cardsScrollContent}
                 showsVerticalScrollIndicator={false}
               >
-                {/* Live Tracking & Get-Off Alert Control Bar */}
-                <View style={styles.trackingControlCard}>
+                {/* Clean Single-Line Full-Width Liquid Glass Live Tracking Pill */}
+                <TouchableOpacity
+                  activeOpacity={0.85}
+                  onPress={
+                    isTrackingRide ? stopAllTracking : handleStartLiveTracking
+                  }
+                  style={[
+                    styles.liveTrackingFullBtn,
+                    isTrackingRide && styles.liveTrackingFullBtnActive,
+                    { flexDirection: rowDir },
+                  ]}
+                >
                   <View
                     style={[
-                      styles.trackingButtonsRow,
+                      styles.liveTrackingIconBadge,
+                      isTrackingRide && styles.liveTrackingIconBadgeActive,
+                    ]}
+                  >
+                    <Ionicons
+                      name={isTrackingRide ? 'radio' : 'notifications'}
+                      size={16}
+                      color="#FFFFFF"
+                    />
+                  </View>
+                  <Text
+                    style={[styles.liveTrackingFullBtnText, { textAlign }]}
+                    numberOfLines={1}
+                    adjustsFontSizeToFit
+                  >
+                    {isTrackingRide
+                      ? t.stopLiveTrackingBtn
+                      : t.startLiveTrackingBtn}
+                  </Text>
+                </TouchableOpacity>
+
+                {isTrackingRide && (
+                  <View
+                    style={[
+                      styles.trackingStatusStrip,
                       { flexDirection: rowDir },
                     ]}
                   >
-                    {!isTrackingRide ? (
-                      <TouchableOpacity
-                        style={[
-                          styles.startTrackingBtn,
-                          { flexDirection: rowDir },
-                        ]}
-                        onPress={handleStartLiveTracking}
-                      >
-                        <Ionicons
-                          name="notifications"
-                          size={16}
-                          color="#FFFFFF"
-                        />
-                        <Text style={styles.startTrackingBtnText}>
-                          {t.startLiveTrackingBtn}
-                        </Text>
-                      </TouchableOpacity>
-                    ) : (
-                      <TouchableOpacity
-                        style={[
-                          styles.stopTrackingBtn,
-                          { flexDirection: rowDir },
-                        ]}
-                        onPress={stopAllTracking}
-                      >
-                        <Ionicons
-                          name="stop-circle"
-                          size={16}
-                          color="#FCA5A5"
-                        />
-                        <Text style={styles.stopTrackingBtnText}>
-                          {t.stopLiveTrackingBtn}
-                        </Text>
-                      </TouchableOpacity>
-                    )}
-
-                    {/* 1-Tap Simulation Button to test live progress & Get-Off Notifications immediately */}
-                    <TouchableOpacity
-                      style={[
-                        styles.simulateBtn,
-                        isSimulatingRide && styles.simulateBtnActive,
-                      ]}
-                      onPress={handleSimulateRide}
-                    >
-                      <Text style={styles.simulateBtnText}>
-                        {t.simulateRideBtn}
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-
-                  {isTrackingRide && (
-                    <View
-                      style={[
-                        styles.trackingStatusStrip,
-                        { flexDirection: rowDir },
-                      ]}
-                    >
-                      <View style={styles.liveGreenPulseDot} />
-                      <Text style={[styles.trackingStatusText, { textAlign }]}>
-                        {selectedJourney.mode === 'bus' &&
-                        selectedJourney.busOption &&
-                        currentStopIndex >= 0
-                          ? t.stopsRemainingLabel.replace(
-                              '{s}',
-                              String(
-                                Math.max(
-                                  0,
-                                  selectedJourney.busOption.intermediateStops
-                                    .length -
-                                    1 -
-                                    currentStopIndex
-                                )
+                    <View style={styles.liveGreenPulseDot} />
+                    <Text style={[styles.trackingStatusText, { textAlign }]}>
+                      {selectedJourney.mode === 'bus' &&
+                      selectedJourney.busOption &&
+                      currentStopIndex >= 0
+                        ? t.stopsRemainingLabel.replace(
+                            '{s}',
+                            String(
+                              Math.max(
+                                0,
+                                selectedJourney.busOption.intermediateStops
+                                  .length -
+                                  1 -
+                                  currentStopIndex
                               )
                             )
-                          : t.trackingActiveBanner}
-                      </Text>
-                    </View>
-                  )}
-                </View>
+                          )
+                        : t.trackingActiveBanner}
+                    </Text>
+                  </View>
+                )}
 
                 {selectedJourney.mode === 'bus' && selectedJourney.busOption ? (
                   (() => {
@@ -1502,8 +1480,8 @@ export default function App() {
                                   {
                                     backgroundColor:
                                       currentStopIndex >= 0
-                                        ? '#10B981'
-                                        : '#3B82F6',
+                                        ? '#30D158'
+                                        : '#0A84FF',
                                   },
                                 ]}
                               >
@@ -1521,7 +1499,7 @@ export default function App() {
                                 style={[
                                   styles.timelineConnector,
                                   currentStopIndex >= 0 && {
-                                    backgroundColor: '#10B981',
+                                    backgroundColor: '#30D158',
                                   },
                                 ]}
                               />
@@ -1596,7 +1574,7 @@ export default function App() {
                               <View
                                 style={[
                                   styles.timelineCircle,
-                                  { backgroundColor: '#2563EB' },
+                                  { backgroundColor: '#0A84FF' },
                                 ]}
                               >
                                 <Ionicons
@@ -1668,7 +1646,7 @@ export default function App() {
                                         : 'chevron-down'
                                     }
                                     size={14}
-                                    color="#60A5FA"
+                                    color="#64D2FF"
                                   />
                                   <Text style={styles.toggleStopsBtnText}>
                                     {showIntermediateStops
@@ -1776,7 +1754,7 @@ export default function App() {
                               <View
                                 style={[
                                   styles.timelineCircle,
-                                  { backgroundColor: '#10B981' },
+                                  { backgroundColor: '#30D158' },
                                 ]}
                               >
                                 <Ionicons
@@ -1826,7 +1804,7 @@ export default function App() {
                               <View
                                 style={[
                                   styles.timelineCircle,
-                                  { backgroundColor: '#EF4444' },
+                                  { backgroundColor: '#FF453A' },
                                 ]}
                               >
                                 <Ionicons
@@ -1976,7 +1954,7 @@ export default function App() {
                           : 'navigate-outline'
                       }
                       size={13}
-                      color="#93C5FD"
+                      color="#64D2FF"
                     />
                     <Text style={styles.sortChipText}>
                       {sortBy === 'fastest'
@@ -2000,9 +1978,9 @@ export default function App() {
                     }}
                   >
                     {loading ? (
-                      <ActivityIndicator size="small" color="#60A5FA" />
+                      <ActivityIndicator size="small" color="#64D2FF" />
                     ) : (
-                      <Ionicons name="refresh" size={16} color="#E5E7EB" />
+                      <Ionicons name="refresh" size={16} color="#F8FAFC" />
                     )}
                   </TouchableOpacity>
                 </View>
@@ -2036,11 +2014,11 @@ export default function App() {
                       onPress={() => {
                         triggerHaptic('selection');
                         setSelectedStationId(rec.station.id);
-                        focusMapOnOriginAndStation(
+                        fitMapToStations(
                           activeOrigin.lat,
                           activeOrigin.lon,
-                          rec.station.lat,
-                          rec.station.lon
+                          recommendations,
+                          { lat: rec.station.lat, lon: rec.station.lon }
                         );
                       }}
                       style={[
@@ -2116,7 +2094,7 @@ export default function App() {
                           ]}
                           onPress={() => handleSelectJourney(rec, 'walk')}
                         >
-                          <Ionicons name="walk" size={16} color="#34D399" />
+                          <Ionicons name="walk" size={16} color="#30D158" />
                           <Text style={styles.modeChipText}>
                             {t.walkDirect}:{' '}
                             <Text style={styles.modeChipBold}>
@@ -2130,7 +2108,7 @@ export default function App() {
                           style={[styles.modeChip, { flexDirection: rowDir }]}
                           onPress={() => handleSelectJourney(rec, 'scooter')}
                         >
-                          <Ionicons name="bicycle" size={16} color="#60A5FA" />
+                          <Ionicons name="bicycle" size={16} color="#64D2FF" />
                           <Text style={styles.modeChipText}>
                             <Text style={styles.modeChipBold}>
                               {rec.scooterMinutes} {t.minUnit}
@@ -2376,7 +2354,7 @@ export default function App() {
               </ScrollView>
             </View>
           )}
-        </BlurView>
+        </LiquidGlassCard>
       </Animated.View>
 
       {/* 4. Native iOS PageSheet Modal for Picking Origin Location */}
@@ -2402,7 +2380,7 @@ export default function App() {
               style={[styles.modalGpsCard, { flexDirection: rowDir }]}
               onPress={handleUseMyGps}
             >
-              <Ionicons name="navigate-circle" size={26} color="#60A5FA" />
+              <Ionicons name="navigate-circle" size={26} color="#0A84FF" />
               <View
                 style={{
                   flex: 1,
@@ -2415,7 +2393,7 @@ export default function App() {
                 </Text>
               </View>
               {activeOrigin.isGps && (
-                <Ionicons name="checkmark-circle" size={22} color="#34D399" />
+                <Ionicons name="checkmark-circle" size={22} color="#30D158" />
               )}
             </TouchableOpacity>
 
@@ -2439,7 +2417,7 @@ export default function App() {
                   <Ionicons
                     name="location-outline"
                     size={20}
-                    color={selected ? '#60A5FA' : '#9CA3AF'}
+                    color={selected ? '#64D2FF' : '#94A3B8'}
                   />
                   <Text
                     style={[
@@ -2454,7 +2432,7 @@ export default function App() {
                     <Ionicons
                       name="checkmark-circle"
                       size={20}
-                      color="#60A5FA"
+                      color="#64D2FF"
                     />
                   )}
                 </TouchableOpacity>
@@ -2470,16 +2448,24 @@ export default function App() {
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: '#090D16',
+    backgroundColor: '#000000',
   },
   map: {
     ...StyleSheet.absoluteFill,
   },
+  liquidGlassBase: {
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.22)',
+  },
+  liquidGlassFallback: {
+    backgroundColor: 'rgba(18, 22, 32, 0.34)',
+  },
   minorStationDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#EF4444',
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: '#FF453A',
     borderWidth: 1.5,
     borderColor: '#FFFFFF',
   },
@@ -2487,7 +2473,7 @@ const styles = StyleSheet.create({
     width: 22,
     height: 22,
     borderRadius: 11,
-    backgroundColor: '#2563EB',
+    backgroundColor: '#0A84FF',
     borderWidth: 2,
     borderColor: '#FFFFFF',
     alignItems: 'center',
@@ -2497,7 +2483,7 @@ const styles = StyleSheet.create({
     width: 28,
     height: 28,
     borderRadius: 14,
-    backgroundColor: '#10B981',
+    backgroundColor: '#30D158',
     borderWidth: 2.5,
     borderColor: '#FFFFFF',
     alignItems: 'center',
@@ -2511,49 +2497,49 @@ const styles = StyleSheet.create({
     width: 8,
     height: 8,
     borderRadius: 4,
-    backgroundColor: '#93C5FD',
+    backgroundColor: '#64D2FF',
     borderWidth: 1.5,
-    borderColor: '#1E3A8A',
+    borderColor: '#003B73',
   },
   intermediateStopDotPassed: {
-    backgroundColor: '#10B981',
+    backgroundColor: '#30D158',
     borderColor: '#064E3B',
   },
   stationMapPin: {
-    backgroundColor: 'rgba(17, 24, 39, 0.94)',
+    backgroundColor: 'rgba(18, 22, 32, 0.88)',
     paddingHorizontal: 8,
     paddingVertical: 4,
-    borderRadius: 12,
-    borderWidth: 1.5,
-    borderColor: '#EF4444',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.28)',
     alignItems: 'center',
+    gap: 5,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 3 },
+    shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.35,
-    shadowRadius: 5,
+    shadowRadius: 6,
   },
   stationMapPinFastest: {
-    borderColor: '#10B981',
-    backgroundColor: 'rgba(6, 78, 59, 0.95)',
+    borderColor: '#30D158',
+    backgroundColor: 'rgba(6, 55, 40, 0.90)',
   },
   stationMapPinSelected: {
-    transform: [{ scale: 1.08 }],
-    borderColor: '#60A5FA',
+    transform: [{ scale: 1.07 }],
+    borderColor: '#64D2FF',
   },
   stationMapPinName: {
-    color: '#F9FAFB',
+    color: '#FFFFFF',
     fontSize: 11,
-    fontWeight: '800',
+    fontWeight: '700',
   },
   stationMapPinEtaPill: {
-    backgroundColor: '#EF4444',
-    paddingHorizontal: 6,
-    paddingVertical: 1,
-    borderRadius: 6,
-    marginTop: 2,
+    backgroundColor: '#FF453A',
+    paddingHorizontal: 5,
+    paddingVertical: 1.5,
+    borderRadius: 8,
   },
   stationMapPinEtaPillFastest: {
-    backgroundColor: '#10B981',
+    backgroundColor: '#30D158',
   },
   stationMapPinEtaText: {
     color: '#FFFFFF',
@@ -2564,7 +2550,7 @@ const styles = StyleSheet.create({
     width: 26,
     height: 26,
     borderRadius: 13,
-    backgroundColor: 'rgba(59, 130, 246, 0.28)',
+    backgroundColor: 'rgba(10, 132, 255, 0.28)',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -2572,7 +2558,7 @@ const styles = StyleSheet.create({
     width: 13,
     height: 13,
     borderRadius: 6.5,
-    backgroundColor: '#3B82F6',
+    backgroundColor: '#0A84FF',
     borderWidth: 2.5,
     borderColor: '#FFFFFF',
   },
@@ -2585,37 +2571,33 @@ const styles = StyleSheet.create({
       Platform.OS === 'android' ? (StatusBar.currentHeight || 24) + 6 : 4,
     gap: 8,
   },
-  topBlurCard: {
-    borderRadius: 18,
-    overflow: 'hidden',
-    padding: 10,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.12)',
-    backgroundColor: 'rgba(15, 23, 42, 0.65)',
-    gap: 8,
+  topGlassCard: {
+    borderRadius: 24,
+    padding: 11,
+    gap: 9,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.28,
+    shadowRadius: 16,
   },
   getOffAlertCard: {
-    borderRadius: 16,
+    borderRadius: 18,
     paddingHorizontal: 14,
     paddingVertical: 12,
     borderWidth: 1.5,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.4,
-    shadowRadius: 6,
     gap: 3,
   },
   getOffAlertPrepare: {
-    backgroundColor: 'rgba(120, 53, 15, 0.96)',
+    backgroundColor: 'rgba(146, 64, 14, 0.78)',
     borderColor: '#F59E0B',
   },
   getOffAlertNow: {
-    backgroundColor: 'rgba(127, 29, 29, 0.97)',
-    borderColor: '#EF4444',
+    backgroundColor: 'rgba(153, 27, 27, 0.84)',
+    borderColor: '#FF453A',
   },
   getOffAlertDone: {
-    backgroundColor: 'rgba(6, 78, 59, 0.96)',
-    borderColor: '#10B981',
+    backgroundColor: 'rgba(6, 95, 70, 0.82)',
+    borderColor: '#30D158',
   },
   getOffAlertTitle: {
     color: '#FFFFFF',
@@ -2633,70 +2615,75 @@ const styles = StyleSheet.create({
   },
   originSelectorBtn: {
     flex: 1,
-    backgroundColor: 'rgba(30, 41, 59, 0.85)',
-    paddingHorizontal: 10,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    paddingHorizontal: 11,
     paddingVertical: 7,
-    borderRadius: 12,
+    borderRadius: 16,
     alignItems: 'center',
     gap: 8,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.08)',
+    borderColor: 'rgba(255, 255, 255, 0.14)',
   },
   originCaption: {
-    color: '#94A3B8',
+    color: 'rgba(255, 255, 255, 0.58)',
     fontSize: 10,
     fontWeight: '600',
   },
   originMainText: {
-    color: '#F8FAFC',
+    color: '#FFFFFF',
     fontSize: 14,
     fontWeight: '700',
   },
-  gpsQuickBtn: {
+  glassCircleIconBtn: {
     width: 38,
     height: 38,
-    borderRadius: 12,
-    backgroundColor: 'rgba(30, 41, 59, 0.85)',
+    borderRadius: 19,
+    backgroundColor: 'rgba(255, 255, 255, 0.09)',
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.08)',
+    borderColor: 'rgba(255, 255, 255, 0.16)',
   },
-  langPillBtn: {
+  glassLangBtn: {
     height: 38,
-    paddingHorizontal: 11,
-    borderRadius: 12,
-    backgroundColor: 'rgba(30, 41, 59, 0.85)',
+    paddingHorizontal: 12,
+    borderRadius: 19,
+    backgroundColor: 'rgba(255, 255, 255, 0.09)',
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.08)',
+    borderColor: 'rgba(255, 255, 255, 0.16)',
   },
   langPillText: {
-    color: '#F8FAFC',
+    color: '#FFFFFF',
     fontSize: 12,
     fontWeight: '800',
   },
-  directionScrollRow: {
-    gap: 6,
-    paddingVertical: 1,
+  directionBarRow: {
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 5,
   },
   directionChip: {
-    backgroundColor: 'rgba(30, 41, 59, 0.8)',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 10,
+    flex: 1,
+    backgroundColor: 'rgba(255, 255, 255, 0.07)',
+    paddingHorizontal: 6,
+    paddingVertical: 6,
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.08)',
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   directionChipActive: {
-    backgroundColor: 'rgba(220, 38, 38, 0.88)',
-    borderColor: '#F87171',
+    backgroundColor: 'rgba(255, 69, 58, 0.78)',
+    borderColor: 'rgba(255, 255, 255, 0.35)',
   },
   directionChipText: {
-    color: '#CBD5E1',
-    fontSize: 11,
+    color: 'rgba(255, 255, 255, 0.78)',
+    fontSize: 10.5,
     fontWeight: '600',
+    textAlign: 'center',
   },
   directionChipTextActive: {
     color: '#FFFFFF',
@@ -2716,7 +2703,7 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   timePickerLabel: {
-    color: '#E2E8F0',
+    color: '#F1F5F9',
     fontSize: 13,
     fontWeight: '700',
   },
@@ -2725,15 +2712,15 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   androidTimeButton: {
-    backgroundColor: '#1E293B',
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
     paddingHorizontal: 12,
     paddingVertical: 6,
-    borderRadius: 8,
+    borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#3B82F6',
+    borderColor: '#0A84FF',
   },
   androidTimeButtonText: {
-    color: '#60A5FA',
+    color: '#64D2FF',
     fontSize: 14,
     fontWeight: '800',
   },
@@ -2743,31 +2730,29 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
   },
-  bottomSheetBlur: {
+  bottomSheetGlass: {
     flex: 1,
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    overflow: 'hidden',
-    backgroundColor: 'rgba(11, 15, 25, 0.88)',
-    borderTopWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.14)',
+    borderTopLeftRadius: 30,
+    borderTopRightRadius: 30,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.22)',
   },
   grabberTouchArea: {
-    paddingTop: 8,
-    paddingBottom: 4,
+    paddingTop: 9,
+    paddingBottom: 5,
     alignItems: 'center',
     justifyContent: 'center',
   },
   sheetGrabber: {
-    width: 42,
+    width: 40,
     height: 5,
-    borderRadius: 3,
-    backgroundColor: 'rgba(156, 163, 175, 0.55)',
+    borderRadius: 2.5,
+    backgroundColor: 'rgba(255, 255, 255, 0.38)',
   },
   collapseChevronBtn: {
     position: 'absolute',
     right: 16,
-    top: 4,
+    top: 5,
   },
   sheetHeaderRow: {
     paddingHorizontal: 14,
@@ -2775,14 +2760,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
+    borderBottomColor: 'rgba(255, 255, 255, 0.14)',
   },
   kGroup: {
     alignItems: 'center',
     gap: 5,
   },
   kTitle: {
-    color: '#9CA3AF',
+    color: 'rgba(255, 255, 255, 0.65)',
     fontSize: 12,
     fontWeight: '600',
     marginHorizontal: 2,
@@ -2790,16 +2775,19 @@ const styles = StyleSheet.create({
   kChip: {
     width: 26,
     height: 26,
-    borderRadius: 8,
-    backgroundColor: 'rgba(31, 41, 55, 0.9)',
+    borderRadius: 13,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
     alignItems: 'center',
     justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
   },
   kChipActive: {
-    backgroundColor: '#3B82F6',
+    backgroundColor: '#0A84FF',
+    borderColor: 'rgba(255, 255, 255, 0.35)',
   },
   kChipText: {
-    color: '#9CA3AF',
+    color: 'rgba(255, 255, 255, 0.65)',
     fontSize: 12,
     fontWeight: '700',
   },
@@ -2811,30 +2799,32 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   sortChip: {
-    backgroundColor: 'rgba(30, 41, 59, 0.9)',
-    paddingHorizontal: 10,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    paddingHorizontal: 11,
     paddingVertical: 5,
-    borderRadius: 10,
+    borderRadius: 14,
     alignItems: 'center',
     gap: 4,
     borderWidth: 1,
-    borderColor: 'rgba(59, 130, 246, 0.3)',
+    borderColor: 'rgba(255, 255, 255, 0.15)',
   },
   sortChipText: {
-    color: '#BFDBFE',
+    color: '#E2E8F0',
     fontSize: 11,
     fontWeight: '700',
   },
   iconRefreshBtn: {
     width: 30,
     height: 30,
-    borderRadius: 9,
-    backgroundColor: 'rgba(31, 41, 55, 0.9)',
+    borderRadius: 15,
+    backgroundColor: 'rgba(255, 255, 255, 0.09)',
     alignItems: 'center',
     justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.14)',
   },
   errorText: {
-    color: '#F87171',
+    color: '#FF453A',
     fontSize: 12,
     paddingHorizontal: 16,
     paddingTop: 4,
@@ -2848,18 +2838,19 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   stationCard: {
-    backgroundColor: 'rgba(17, 24, 39, 0.92)',
-    borderRadius: 18,
-    padding: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    borderRadius: 22,
+    padding: 13,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.08)',
+    borderColor: 'rgba(255, 255, 255, 0.14)',
     gap: 10,
   },
   stationCardSelected: {
-    borderColor: 'rgba(96, 165, 250, 0.55)',
+    borderColor: 'rgba(100, 210, 255, 0.55)',
+    backgroundColor: 'rgba(255, 255, 255, 0.09)',
   },
   stationCardFastest: {
-    borderColor: '#10B981',
+    borderColor: 'rgba(48, 209, 88, 0.7)',
     borderWidth: 1.5,
   },
   cardHeaderRow: {
@@ -2876,35 +2867,35 @@ const styles = StyleSheet.create({
     width: 22,
     height: 22,
     borderRadius: 11,
-    backgroundColor: '#1F2937',
+    backgroundColor: 'rgba(255, 255, 255, 0.12)',
     alignItems: 'center',
     justifyContent: 'center',
   },
   rankBadgeText: {
-    color: '#F9FAFB',
+    color: '#FFFFFF',
     fontSize: 11,
     fontWeight: '800',
   },
   stationNameText: {
-    color: '#F9FAFB',
+    color: '#FFFFFF',
     fontSize: 18,
     fontWeight: '800',
   },
   fastestPill: {
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
-    paddingHorizontal: 7,
-    paddingVertical: 2,
-    borderRadius: 6,
+    backgroundColor: 'rgba(48, 209, 88, 0.2)',
+    paddingHorizontal: 8,
+    paddingVertical: 2.5,
+    borderRadius: 8,
     borderWidth: 1,
-    borderColor: 'rgba(16, 185, 129, 0.5)',
+    borderColor: 'rgba(48, 209, 88, 0.5)',
   },
   fastestPillText: {
-    color: '#34D399',
+    color: '#30D158',
     fontSize: 10,
     fontWeight: '800',
   },
   stationSubMeta: {
-    color: '#9CA3AF',
+    color: 'rgba(255, 255, 255, 0.6)',
     fontSize: 11,
     marginTop: 3,
   },
@@ -2913,10 +2904,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   redLineChip: {
-    backgroundColor: '#DC2626',
+    backgroundColor: '#FF453A',
     paddingHorizontal: 7,
     paddingVertical: 3,
-    borderRadius: 6,
+    borderRadius: 7,
   },
   redLineChipText: {
     color: '#FFFFFF',
@@ -2930,48 +2921,49 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
   },
   modeChip: {
-    backgroundColor: 'rgba(31, 41, 55, 0.85)',
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
     paddingHorizontal: 10,
     paddingVertical: 6,
-    borderRadius: 10,
+    borderRadius: 12,
     alignItems: 'center',
     gap: 5,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
   },
   modeChipBest: {
-    borderWidth: 1,
-    borderColor: '#10B981',
+    borderColor: '#30D158',
   },
   modeChipText: {
-    color: '#D1D5DB',
+    color: 'rgba(255, 255, 255, 0.8)',
     fontSize: 11,
   },
   modeChipBold: {
-    color: '#F9FAFB',
+    color: '#FFFFFF',
     fontWeight: '800',
   },
   emptyBusBox: {
-    backgroundColor: 'rgba(31, 41, 55, 0.6)',
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
     padding: 9,
-    borderRadius: 10,
+    borderRadius: 12,
   },
   emptyBusText: {
-    color: '#9CA3AF',
+    color: 'rgba(255, 255, 255, 0.55)',
     fontSize: 11,
   },
   busListContainer: {
     gap: 8,
   },
   busRowCard: {
-    backgroundColor: 'rgba(24, 34, 52, 0.9)',
-    borderRadius: 12,
-    padding: 9,
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    borderRadius: 16,
+    padding: 10,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.06)',
+    borderColor: 'rgba(255, 255, 255, 0.12)',
     gap: 6,
   },
   busRowCardPrimary: {
-    borderColor: 'rgba(59, 130, 246, 0.5)',
-    backgroundColor: 'rgba(23, 37, 64, 0.95)',
+    borderColor: 'rgba(10, 132, 255, 0.55)',
+    backgroundColor: 'rgba(10, 132, 255, 0.14)',
   },
   busRowHeader: {
     alignItems: 'center',
@@ -2987,10 +2979,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    backgroundColor: '#2563EB',
+    backgroundColor: '#0A84FF',
     paddingHorizontal: 9,
     paddingVertical: 5,
-    borderRadius: 8,
+    borderRadius: 10,
   },
   busNumText: {
     color: '#FFFFFF',
@@ -3003,56 +2995,56 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
   },
   statusBadge: {
-    paddingHorizontal: 5,
+    paddingHorizontal: 6,
     paddingVertical: 1.5,
-    borderRadius: 4,
+    borderRadius: 5,
   },
   statusBadgeLive: {
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+    backgroundColor: 'rgba(48, 209, 88, 0.22)',
   },
   statusBadgeSched: {
-    backgroundColor: 'rgba(148, 163, 184, 0.2)',
+    backgroundColor: 'rgba(255, 255, 255, 0.14)',
   },
   statusBadgeText: {
     fontSize: 9,
     fontWeight: '800',
   },
   statusTextLive: {
-    color: '#34D399',
+    color: '#30D158',
   },
   statusTextSched: {
-    color: '#CBD5E1',
+    color: '#E2E8F0',
   },
   busTimingHeadline: {
-    color: '#F8FAFC',
+    color: '#FFFFFF',
     fontSize: 12,
     fontWeight: '700',
   },
   busSubTimeline: {
-    color: '#94A3B8',
+    color: 'rgba(255, 255, 255, 0.62)',
     fontSize: 11,
     marginTop: 1,
   },
   busSubTimelineBold: {
-    color: '#E2E8F0',
+    color: '#FFFFFF',
     fontWeight: '700',
   },
   totalDurationBox: {
-    backgroundColor: 'rgba(15, 23, 42, 0.9)',
-    paddingHorizontal: 9,
-    paddingVertical: 4,
-    borderRadius: 8,
+    backgroundColor: 'rgba(255, 255, 255, 0.09)',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 11,
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.08)',
+    borderColor: 'rgba(255, 255, 255, 0.16)',
   },
   totalDurationNum: {
-    color: '#F8FAFC',
+    color: '#FFFFFF',
     fontSize: 15,
     fontWeight: '800',
   },
   totalDurationUnit: {
-    color: '#94A3B8',
+    color: 'rgba(255, 255, 255, 0.65)',
     fontSize: 9,
     fontWeight: '600',
   },
@@ -3065,7 +3057,7 @@ const styles = StyleSheet.create({
   urgencyPill: {
     paddingHorizontal: 8,
     paddingVertical: 2.5,
-    borderRadius: 6,
+    borderRadius: 7,
     borderWidth: 1,
   },
   urgencyPillText: {
@@ -3073,36 +3065,36 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   backupBusText: {
-    color: '#94A3B8',
+    color: 'rgba(255, 255, 255, 0.65)',
     fontSize: 10,
     fontWeight: '600',
   },
   breadcrumbBar: {
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: 'rgba(15, 23, 42, 0.75)',
+    backgroundColor: 'rgba(0, 0, 0, 0.28)',
     paddingHorizontal: 8,
     paddingVertical: 5,
-    borderRadius: 8,
+    borderRadius: 10,
     gap: 4,
   },
   breadcrumbStep: {
     flex: 1,
-    color: '#CBD5E1',
+    color: 'rgba(255, 255, 255, 0.8)',
     fontSize: 10,
   },
   breadcrumbStepEnd: {
-    color: '#93C5FD',
+    color: '#64D2FF',
     fontSize: 10,
     fontWeight: '700',
   },
   breadcrumbArrow: {
-    color: '#64748B',
+    color: 'rgba(255, 255, 255, 0.45)',
     fontSize: 11,
     fontWeight: '700',
   },
   tapForTravelHint: {
-    color: '#60A5FA',
+    color: '#64D2FF',
     fontSize: 10,
     fontWeight: '700',
     marginTop: 2,
@@ -3114,109 +3106,80 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: 'rgba(255, 255, 255, 0.12)',
+    borderBottomColor: 'rgba(255, 255, 255, 0.14)',
   },
   backBtnPill: {
-    backgroundColor: 'rgba(30, 41, 59, 0.9)',
-    paddingHorizontal: 10,
+    backgroundColor: 'rgba(255, 255, 255, 0.09)',
+    paddingHorizontal: 11,
     paddingVertical: 6,
-    borderRadius: 10,
+    borderRadius: 14,
     alignItems: 'center',
     gap: 4,
     borderWidth: 1,
-    borderColor: 'rgba(96, 165, 250, 0.35)',
+    borderColor: 'rgba(255, 255, 255, 0.18)',
   },
   backBtnText: {
-    color: '#93C5FD',
+    color: '#64D2FF',
     fontSize: 12,
     fontWeight: '700',
   },
   journeyHeaderTitle: {
-    color: '#F8FAFC',
+    color: '#FFFFFF',
     fontSize: 15,
     fontWeight: '800',
   },
   journeyTotalBadge: {
-    backgroundColor: '#10B981',
-    paddingHorizontal: 10,
+    backgroundColor: '#30D158',
+    paddingHorizontal: 11,
     paddingVertical: 5,
-    borderRadius: 10,
+    borderRadius: 12,
   },
   journeyTotalBadgeText: {
     color: '#FFFFFF',
     fontSize: 13,
     fontWeight: '800',
   },
-  trackingControlCard: {
-    backgroundColor: 'rgba(17, 24, 39, 0.95)',
-    borderRadius: 14,
-    padding: 10,
+  liveTrackingFullBtn: {
+    backgroundColor: 'rgba(10, 132, 255, 0.25)',
     borderWidth: 1,
-    borderColor: 'rgba(59, 130, 246, 0.35)',
-    gap: 8,
-  },
-  trackingButtonsRow: {
+    borderColor: 'rgba(100, 210, 255, 0.55)',
+    borderRadius: 18,
+    paddingVertical: 11,
+    paddingHorizontal: 14,
     alignItems: 'center',
-    gap: 8,
+    gap: 10,
   },
-  startTrackingBtn: {
-    flex: 1,
-    backgroundColor: '#2563EB',
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: 11,
+  liveTrackingFullBtnActive: {
+    backgroundColor: 'rgba(255, 69, 58, 0.25)',
+    borderColor: 'rgba(255, 105, 97, 0.65)',
+  },
+  liveTrackingIconBadge: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: '#0A84FF',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
   },
-  startTrackingBtnText: {
+  liveTrackingIconBadgeActive: {
+    backgroundColor: '#FF453A',
+  },
+  liveTrackingFullBtnText: {
+    flex: 1,
     color: '#FFFFFF',
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: '800',
-  },
-  stopTrackingBtn: {
-    flex: 1,
-    backgroundColor: 'rgba(127, 29, 29, 0.85)',
-    borderWidth: 1,
-    borderColor: '#EF4444',
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: 11,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-  },
-  stopTrackingBtnText: {
-    color: '#FECACA',
-    fontSize: 13,
-    fontWeight: '800',
-  },
-  simulateBtn: {
-    backgroundColor: 'rgba(30, 41, 59, 0.95)',
-    borderWidth: 1,
-    borderColor: '#60A5FA',
-    paddingVertical: 10,
-    paddingHorizontal: 11,
-    borderRadius: 11,
-  },
-  simulateBtnActive: {
-    backgroundColor: '#1D4ED8',
-  },
-  simulateBtnText: {
-    color: '#BFDBFE',
-    fontSize: 12,
-    fontWeight: '700',
   },
   trackingStatusStrip: {
     alignItems: 'center',
     gap: 8,
-    paddingHorizontal: 4,
+    paddingHorizontal: 6,
   },
   liveGreenPulseDot: {
     width: 9,
     height: 9,
     borderRadius: 4.5,
-    backgroundColor: '#10B981',
+    backgroundColor: '#30D158',
   },
   trackingStatusText: {
     color: '#6EE7B7',
@@ -3224,11 +3187,11 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   journeyCard: {
-    backgroundColor: 'rgba(17, 24, 39, 0.94)',
-    borderRadius: 18,
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    borderRadius: 22,
     padding: 14,
     borderWidth: 1,
-    borderColor: 'rgba(96, 165, 250, 0.35)',
+    borderColor: 'rgba(255, 255, 255, 0.16)',
     gap: 12,
   },
   timelineWrapper: {
@@ -3251,8 +3214,8 @@ const styles = StyleSheet.create({
   },
   timelineConnector: {
     flex: 1,
-    width: 2.5,
-    backgroundColor: 'rgba(71, 85, 105, 0.7)',
+    width: 2,
+    backgroundColor: 'rgba(255, 255, 255, 0.22)',
     marginVertical: 4,
     minHeight: 24,
   },
@@ -3269,49 +3232,51 @@ const styles = StyleSheet.create({
   },
   timelineTitle: {
     flex: 1,
-    color: '#F8FAFC',
+    color: '#FFFFFF',
     fontSize: 15,
     fontWeight: '800',
   },
   timelineSubtitle: {
-    color: '#94A3B8',
+    color: 'rgba(255, 255, 255, 0.65)',
     fontSize: 12,
   },
   timelineTimeTag: {
-    color: '#CBD5E1',
-    fontSize: 13,
+    color: '#F1F5F9',
+    fontSize: 12,
     fontWeight: '700',
-    backgroundColor: 'rgba(30, 41, 59, 0.9)',
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
     paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 6,
+    paddingVertical: 2.5,
+    borderRadius: 7,
   },
   timelineTimeTagHighlight: {
-    color: '#93C5FD',
-    fontSize: 13,
+    color: '#64D2FF',
+    fontSize: 12,
     fontWeight: '800',
-    backgroundColor: 'rgba(37, 99, 235, 0.25)',
+    backgroundColor: 'rgba(10, 132, 255, 0.25)',
     paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 6,
+    paddingVertical: 2.5,
+    borderRadius: 7,
   },
   timelineTimeTagGreen: {
     color: '#6EE7B7',
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '800',
-    backgroundColor: 'rgba(16, 185, 129, 0.22)',
+    backgroundColor: 'rgba(48, 209, 88, 0.22)',
     paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 6,
+    paddingVertical: 2.5,
+    borderRadius: 7,
   },
   inlineActionBtn: {
-    backgroundColor: '#2563EB',
-    paddingHorizontal: 12,
+    backgroundColor: 'rgba(10, 132, 255, 0.85)',
+    paddingHorizontal: 13,
     paddingVertical: 7,
-    borderRadius: 10,
+    borderRadius: 12,
     alignItems: 'center',
     gap: 6,
     marginTop: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.22)',
   },
   inlineActionBtnText: {
     color: '#FFFFFF',
@@ -3324,17 +3289,19 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
   },
   toggleStopsBtnText: {
-    color: '#60A5FA',
+    color: '#64D2FF',
     fontSize: 12,
     fontWeight: '700',
   },
   intermediateListBox: {
     width: '100%',
-    backgroundColor: 'rgba(15, 23, 42, 0.85)',
-    borderRadius: 10,
+    backgroundColor: 'rgba(0, 0, 0, 0.28)',
+    borderRadius: 14,
     padding: 10,
     gap: 7,
     marginTop: 2,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
   },
   intermediateStopRow: {
     alignItems: 'center',
@@ -3344,33 +3311,33 @@ const styles = StyleSheet.create({
     borderRadius: 6,
   },
   intermediateStopRowCurrent: {
-    backgroundColor: 'rgba(37, 99, 235, 0.22)',
+    backgroundColor: 'rgba(10, 132, 255, 0.22)',
   },
   intermediateBullet: {
     width: 8,
     height: 8,
     borderRadius: 4,
-    backgroundColor: '#64748B',
+    backgroundColor: 'rgba(255, 255, 255, 0.38)',
   },
   intermediateBulletPassed: {
-    backgroundColor: '#10B981',
+    backgroundColor: '#30D158',
   },
   intermediateBulletCurrent: {
-    backgroundColor: '#60A5FA',
+    backgroundColor: '#64D2FF',
     width: 10,
     height: 10,
     borderRadius: 5,
   },
   intermediateBulletLast: {
-    backgroundColor: '#EF4444',
+    backgroundColor: '#FF453A',
   },
   intermediateStopName: {
     flex: 1,
-    color: '#CBD5E1',
+    color: 'rgba(255, 255, 255, 0.82)',
     fontSize: 12,
   },
   intermediateStopNamePassed: {
-    color: '#64748B',
+    color: 'rgba(255, 255, 255, 0.38)',
     textDecorationLine: 'line-through',
   },
   intermediateStopNameCurrent: {
@@ -3382,12 +3349,12 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   intermediateMinText: {
-    color: '#64748B',
+    color: 'rgba(255, 255, 255, 0.5)',
     fontSize: 11,
     fontWeight: '600',
   },
   liveStopStatusTag: {
-    color: '#60A5FA',
+    color: '#64D2FF',
     fontSize: 11,
     fontWeight: '800',
   },
@@ -3397,12 +3364,12 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   getOffHereBadge: {
-    backgroundColor: 'rgba(239, 68, 68, 0.25)',
+    backgroundColor: 'rgba(255, 69, 58, 0.25)',
     paddingHorizontal: 6,
     paddingVertical: 2,
-    borderRadius: 5,
+    borderRadius: 6,
     borderWidth: 1,
-    borderColor: '#EF4444',
+    borderColor: '#FF453A',
   },
   getOffHereBadgeText: {
     color: '#FCA5A5',
@@ -3410,25 +3377,25 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   footerInfo: {
-    color: '#6B7280',
+    color: 'rgba(255, 255, 255, 0.42)',
     fontSize: 10,
     textAlign: 'center',
     marginTop: 4,
   },
   modalContainer: {
     flex: 1,
-    backgroundColor: '#0F172A',
+    backgroundColor: '#0A0E17',
   },
   modalHeader: {
     paddingHorizontal: 18,
     paddingVertical: 16,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#1E293B',
+    borderBottomColor: 'rgba(255, 255, 255, 0.14)',
     alignItems: 'center',
     justifyContent: 'space-between',
   },
   modalTitle: {
-    color: '#F8FAFC',
+    color: '#FFFFFF',
     fontSize: 18,
     fontWeight: '800',
   },
@@ -3437,7 +3404,7 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
   },
   modalDoneText: {
-    color: '#60A5FA',
+    color: '#64D2FF',
     fontSize: 16,
     fontWeight: '700',
   },
@@ -3446,47 +3413,48 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   modalGpsCard: {
-    backgroundColor: '#1E293B',
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
     padding: 14,
-    borderRadius: 14,
+    borderRadius: 16,
     alignItems: 'center',
     gap: 12,
     borderWidth: 1,
-    borderColor: '#3B82F6',
+    borderColor: '#0A84FF',
   },
   modalGpsTitle: {
-    color: '#F8FAFC',
+    color: '#FFFFFF',
     fontSize: 16,
     fontWeight: '700',
   },
   modalGpsSub: {
-    color: '#94A3B8',
+    color: 'rgba(255, 255, 255, 0.6)',
     fontSize: 12,
     marginTop: 2,
   },
   modalSectionHeader: {
-    color: '#94A3B8',
+    color: 'rgba(255, 255, 255, 0.6)',
     fontSize: 12,
     fontWeight: '700',
     marginTop: 10,
     marginBottom: 2,
   },
   modalPresetRow: {
-    backgroundColor: '#1E293B',
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
     paddingHorizontal: 14,
     paddingVertical: 13,
-    borderRadius: 12,
+    borderRadius: 14,
     alignItems: 'center',
     gap: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
   },
   modalPresetRowActive: {
-    borderWidth: 1,
-    borderColor: '#60A5FA',
-    backgroundColor: '#172554',
+    borderColor: '#64D2FF',
+    backgroundColor: 'rgba(10, 132, 255, 0.18)',
   },
   modalPresetText: {
     flex: 1,
-    color: '#E2E8F0',
+    color: '#F1F5F9',
     fontSize: 15,
     fontWeight: '600',
   },
