@@ -67,6 +67,20 @@ export interface Translations {
   startWalkingInMaps: string;
   navigateToStationMaps: string;
   tapForTravelScreen: string;
+  startLiveTrackingBtn: string;
+  stopLiveTrackingBtn: string;
+  simulateRideBtn: string;
+  trackingActiveBanner: string;
+  stopsRemainingLabel: string;
+  prepareToGetOffAlertTitle: string;
+  prepareToGetOffAlertBody: string;
+  getOffNowAlertTitle: string;
+  getOffNowAlertBody: string;
+  reachedDankalTitle: string;
+  reachedDankalBody: string;
+  passedStopStatus: string;
+  nextStopStatus: string;
+  getOffHereBadge: string;
 }
 
 export const STRINGS: Record<Language, Translations> = {
@@ -136,7 +150,21 @@ export const STRINGS: Record<Language, Translations> = {
     hideStopsCount: 'הסתר תחנות ביניים',
     startWalkingInMaps: 'נווט בהליכה לתחנת האוטובוס',
     navigateToStationMaps: 'פתח ניווט לתחנת הדנקל',
-    tapForTravelScreen: 'לחץ לפירוט מסלול וניווט חי ‹',
+    tapForTravelScreen: 'לחץ לפירוט מסלול ומעקב חי ‹',
+    startLiveTrackingBtn: 'הפעל מעקב חי והתראת ירידה 🔔',
+    stopLiveTrackingBtn: 'עצור מעקב חי',
+    simulateRideBtn: 'הדמיית נסיעה ⚡',
+    trackingActiveBanner: 'מעקב GPS פעיל • נתריע לך תחנה לפני הירידה',
+    stopsRemainingLabel: 'נותרו {s} תחנות לירידה',
+    prepareToGetOffAlertTitle: '🔔 היכונו לירידה בתחנה הבאה!',
+    prepareToGetOffAlertBody: 'התחנה הבאה היא {stop}. שם יורדים לדנקל {station}.',
+    getOffNowAlertTitle: '🛑 רד עכשיו מהאוטובוס!',
+    getOffNowAlertBody: 'הגעת ל-{stop}! הולכים {m} מ\' לרציף דנקל {station}.',
+    reachedDankalTitle: '🎉 הגעת לתחנת דנקל {station}!',
+    reachedDankalBody: 'נסיעה טובה בקו האדום!',
+    passedStopStatus: 'עברנו',
+    nextStopStatus: 'התחנה הבאה',
+    getOffHereBadge: 'יורדים כאן!',
   },
   en: {
     appTitle: 'KalToRakal',
@@ -204,7 +232,21 @@ export const STRINGS: Record<Language, Translations> = {
     hideStopsCount: 'Hide intermediate stops',
     startWalkingInMaps: 'Start Walking to Bus Stop in Maps',
     navigateToStationMaps: 'Open Directions to Dankal Station',
-    tapForTravelScreen: 'Tap for live step-by-step route ›',
+    tapForTravelScreen: 'Tap for live route & get-off alerts ›',
+    startLiveTrackingBtn: 'Start Live Tracking & Get-Off Alerts 🔔',
+    stopLiveTrackingBtn: 'Stop Tracking',
+    simulateRideBtn: 'Simulate Ride ⚡',
+    trackingActiveBanner: 'Live GPS Tracking • Alerting 1 stop before exit',
+    stopsRemainingLabel: '{s} stops left until exit',
+    prepareToGetOffAlertTitle: '🔔 Get Ready! Next Stop is Yours',
+    prepareToGetOffAlertBody: 'Next stop is {stop}. Get off there for Dankal {station}.',
+    getOffNowAlertTitle: '🛑 Get Off the Bus Now!',
+    getOffNowAlertBody: 'Arrived at {stop}! Walk {m}m to Dankal {station}.',
+    reachedDankalTitle: '🎉 Arrived at Dankal {station}!',
+    reachedDankalBody: 'Have a great ride on the Red Line!',
+    passedStopStatus: 'Passed',
+    nextStopStatus: 'Next Stop',
+    getOffHereBadge: 'GET OFF HERE',
   },
 };
 

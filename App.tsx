@@ -14,6 +14,7 @@ import {
   Dimensions,
   Animated,
   PanResponder,
+  Vibration,
 } from 'react-native';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import DateTimePicker, {
@@ -23,6 +24,7 @@ import SegmentedControl from '@react-native-segmented-control/segmented-control'
 import { BlurView } from 'expo-blur';
 import * as Haptics from 'expo-haptics';
 import * as Location from 'expo-location';
+import * as Notifications from 'expo-notifications';
 import { Ionicons } from '@expo/vector-icons';
 import {
   DankalDirection,
@@ -38,15 +40,27 @@ import {
   computeRoutesToNearestDankalStations,
   getAllStations,
   getRedLinePolylines,
+  haversineMeters,
 } from './src/services/routingEngine';
+
+// Configure foreground push notifications so get-off alerts pop up with sound & banner even while app is open
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldShowBanner: true,
+    shouldShowList: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
 
 const NativeSegmentedControl =
   SegmentedControl as unknown as React.ComponentType<any>;
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 const SHEET_COLLAPSED_HEIGHT = 135;
-const SHEET_DEFAULT_HEIGHT = Math.round(SCREEN_HEIGHT * 0.54);
-const SHEET_EXPANDED_HEIGHT = Math.round(SCREEN_HEIGHT * 0.80);
+const SHEET_DEFAULT_HEIGHT = Math.round(SCREEN_HEIGHT * 0.55);
+const SHEET_EXPANDED_HEIGHT = Math.round(SCREEN_HEIGHT * 0.82);
 
 export default function App() {
   const mapRef = useRef<MapView | null>(null);
@@ -66,13 +80,40 @@ export default function App() {
     null
   );
 
-  // Active Travel Screen state when user taps a specific route option
+  // Active Travel Screen state
   const [selectedJourney, setSelectedJourney] =
     useState<SelectedJourney | null>(null);
   const [showIntermediateStops, setShowIntermediateStops] =
-    useState<boolean>(false);
+    useState<boolean>(true);
 
-  // Collapsible / Draggable Bottom Sheet State ('collapsed' | 'default' | 'expanded')
+  // Live Route Progress & Get-Off Alert State
+  const [isTrackingRide, setIsTrackingRide] = useState<boolean>(false);
+  const [isSimulatingRide, setIsSimulatingRide] = useState<boolean>(false);
+  const [liveUserCoords, setLiveUserCoords] = useState<{
+    lat: number;
+    lon: number;
+  } | null>(null);
+  // currentStopIndex: -1 = walking to boarding stop, 0..N-1 = index in intermediateStops, N = reached Dankal
+  const [currentStopIndex, setCurrentStopIndex] = useState<number>(-1);
+  const [activeAlertBanner, setActiveAlertBanner] = useState<{
+    level: 'prepare' | 'get_off' | 'done';
+    title: string;
+    body: string;
+  } | null>(null);
+
+  const locationSubRef = useRef<Location.LocationSubscription | null>(null);
+  const simIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const firedAlertsRef = useRef<{
+    prepareFired: boolean;
+    getOffFired: boolean;
+    doneFired: boolean;
+  }>({
+    prepareFired: false,
+    getOffFired: false,
+    doneFired: false,
+  });
+
+  // Collapsible / Draggable Bottom Sheet State
   const [sheetSnap, setSheetSnap] = useState<
     'collapsed' | 'default' | 'expanded'
   >('default');
@@ -107,8 +148,6 @@ export default function App() {
   const cycleSheetSnap = useCallback(() => {
     if (sheetSnap === 'default') {
       snapSheetTo('collapsed');
-    } else if (sheetSnap === 'collapsed') {
-      snapSheetTo('default');
     } else {
       snapSheetTo('default');
     }
@@ -136,7 +175,6 @@ export default function App() {
           sheetHeightAnim.setValue(nextHeight);
         },
         onPanResponderRelease: (_, gestureState) => {
-          // If it was a quick tap on the grabber bar, toggle collapsed <-> default
           if (
             Math.abs(gestureState.dy) < 6 &&
             Math.abs(gestureState.vy) < 0.15
@@ -193,16 +231,298 @@ export default function App() {
   const { r1Coords, r2BranchCoords } = useMemo(() => getRedLinePolylines(), []);
 
   const triggerHaptic = (
-    type: 'selection' | 'light' | 'success' = 'selection'
+    type: 'selection' | 'light' | 'success' | 'warning' | 'error' = 'selection'
   ) => {
     if (Platform.OS === 'web') return;
     if (type === 'selection') {
       Haptics.selectionAsync();
     } else if (type === 'light') {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    } else if (type === 'warning') {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+    } else if (type === 'error') {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     } else {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     }
+  };
+
+  const fireLocalNotification = useCallback(
+    async (title: string, body: string) => {
+      try {
+        await Notifications.scheduleNotificationAsync({
+          content: {
+            title,
+            body,
+            sound: true,
+          },
+          trigger: null,
+        });
+      } catch {
+        // Fallback if notifications permission wasn't granted
+      }
+    },
+    []
+  );
+
+  const stopAllTracking = useCallback(() => {
+    if (locationSubRef.current) {
+      locationSubRef.current.remove();
+      locationSubRef.current = null;
+    }
+    if (simIntervalRef.current) {
+      clearInterval(simIntervalRef.current);
+      simIntervalRef.current = null;
+    }
+    setIsTrackingRide(false);
+    setIsSimulatingRide(false);
+    setLiveUserCoords(null);
+    setCurrentStopIndex(-1);
+    setActiveAlertBanner(null);
+    firedAlertsRef.current = {
+      prepareFired: false,
+      getOffFired: false,
+      doneFired: false,
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      stopAllTracking();
+    };
+  }, [stopAllTracking]);
+
+  /**
+   * Evaluates live user coordinates against the selected route's stops and triggers:
+   * - "Get Ready! Next stop is yours" (1 stop before exit)
+   * - "Get Off Now!" (within 170m of alighting stop)
+   * - "Arrived at Dankal Station!" (within 90m of Dankal station)
+   */
+  const evaluateRouteProgress = useCallback(
+    (lat: number, lon: number, journey: SelectedJourney) => {
+      setLiveUserCoords({ lat, lon });
+      const rec = journey.recommendation;
+      const stName = isRTL ? rec.station.name_he : rec.station.name_en;
+
+      if (journey.mode === 'bus' && journey.busOption) {
+        const bus = journey.busOption;
+        const stops = bus.intermediateStops;
+        const alightName = isRTL ? bus.alightStopNameHe : bus.alightStopNameEn;
+
+        // Check distance to Dankal station itself
+        const distToDankal = haversineMeters(
+          lat,
+          lon,
+          rec.station.lat,
+          rec.station.lon
+        );
+
+        // Find closest stop along [originStop, ...intermediateStops]
+        let closestIdx = -1;
+        let minStopDist = haversineMeters(
+          lat,
+          lon,
+          bus.originStopLat,
+          bus.originStopLon
+        );
+
+        for (let i = 0; i < stops.length; i++) {
+          const d = haversineMeters(lat, lon, stops[i].lat, stops[i].lon);
+          if (d < minStopDist) {
+            minStopDist = d;
+            closestIdx = i;
+          }
+        }
+
+        setCurrentStopIndex((prev) => Math.max(prev, closestIdx));
+
+        const lastStopIdx = stops.length - 1;
+        const distToAlight = haversineMeters(
+          lat,
+          lon,
+          bus.alightStopLat,
+          bus.alightStopLon
+        );
+
+        // 1. Check if 1 stop before alighting stop ("Prepare to get off!")
+        if (
+          lastStopIdx >= 1 &&
+          closestIdx === lastStopIdx - 1 &&
+          !firedAlertsRef.current.prepareFired
+        ) {
+          firedAlertsRef.current.prepareFired = true;
+          const title = t.prepareToGetOffAlertTitle;
+          const body = t.prepareToGetOffAlertBody
+            .replace('{stop}', alightName)
+            .replace('{station}', stName);
+          triggerHaptic('warning');
+          Vibration.vibrate(400);
+          setActiveAlertBanner({ level: 'prepare', title, body });
+          fireLocalNotification(title, body);
+        }
+
+        // 2. Check if arrived at alighting stop ("Get Off Now!")
+        if (
+          (closestIdx === lastStopIdx || distToAlight <= 170) &&
+          !firedAlertsRef.current.getOffFired
+        ) {
+          firedAlertsRef.current.getOffFired = true;
+          setCurrentStopIndex(lastStopIdx);
+          const title = t.getOffNowAlertTitle;
+          const body = t.getOffNowAlertBody
+            .replace('{stop}', alightName)
+            .replace('{m}', String(bus.walkFromBusMeters))
+            .replace('{station}', stName);
+          triggerHaptic('error');
+          Vibration.vibrate([0, 500, 200, 500]);
+          setActiveAlertBanner({ level: 'get_off', title, body });
+          fireLocalNotification(title, body);
+        }
+
+        // 3. Check if reached the Dankal station entrance
+        if (
+          distToDankal <= 85 &&
+          firedAlertsRef.current.getOffFired &&
+          !firedAlertsRef.current.doneFired
+        ) {
+          firedAlertsRef.current.doneFired = true;
+          const title = t.reachedDankalTitle.replace('{station}', stName);
+          const body = t.reachedDankalBody;
+          triggerHaptic('success');
+          setActiveAlertBanner({ level: 'done', title, body });
+          fireLocalNotification(title, body);
+        }
+      } else {
+        // Walking / Scooter direct mode
+        const distToDankal = haversineMeters(
+          lat,
+          lon,
+          rec.station.lat,
+          rec.station.lon
+        );
+        if (distToDankal <= 90 && !firedAlertsRef.current.doneFired) {
+          firedAlertsRef.current.doneFired = true;
+          const title = t.reachedDankalTitle.replace('{station}', stName);
+          const body = t.reachedDankalBody;
+          triggerHaptic('success');
+          setActiveAlertBanner({ level: 'done', title, body });
+          fireLocalNotification(title, body);
+        }
+      }
+    },
+    [fireLocalNotification, isRTL, t]
+  );
+
+  /**
+   * Starts real live GPS tracking (`watchPositionAsync`) + requests notification permissions
+   */
+  const handleStartLiveTracking = async () => {
+    if (!selectedJourney) return;
+    stopAllTracking();
+    triggerHaptic('light');
+
+    try {
+      await Notifications.requestPermissionsAsync();
+    } catch {
+      // ignore if unsupported
+    }
+
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status !== 'granted') {
+      setGpsError(
+        lang === 'he'
+          ? 'נדרשת הרשאת GPS למעקב חי'
+          : 'GPS permission required for live tracking'
+      );
+      return;
+    }
+
+    setIsTrackingRide(true);
+    setShowIntermediateStops(true);
+
+    const sub = await Location.watchPositionAsync(
+      {
+        accuracy: Location.Accuracy.High,
+        distanceInterval: 15,
+        timeInterval: 3000,
+      },
+      (loc) => {
+        evaluateRouteProgress(
+          loc.coords.latitude,
+          loc.coords.longitude,
+          selectedJourney
+        );
+      }
+    );
+    locationSubRef.current = sub;
+  };
+
+  /**
+   * Interactive Demo / Simulation mode: steps the live bus/user position along each stop
+   * every 2.2 seconds so you can test the live progress bar, camera follow, and get-off alerts right now!
+   */
+  const handleSimulateRide = async () => {
+    if (!selectedJourney) return;
+    stopAllTracking();
+    triggerHaptic('light');
+
+    try {
+      await Notifications.requestPermissionsAsync();
+    } catch {
+      // ignore
+    }
+
+    setIsTrackingRide(true);
+    setIsSimulatingRide(true);
+    setShowIntermediateStops(true);
+
+    const rec = selectedJourney.recommendation;
+    const waypoints: { lat: number; lon: number }[] = [];
+
+    if (selectedJourney.mode === 'bus' && selectedJourney.busOption) {
+      const bus = selectedJourney.busOption;
+      waypoints.push({ lat: bus.originStopLat, lon: bus.originStopLon });
+      for (const s of bus.intermediateStops) {
+        waypoints.push({ lat: s.lat, lon: s.lon });
+      }
+      waypoints.push({ lat: rec.station.lat, lon: rec.station.lon });
+    } else {
+      waypoints.push({ lat: activeOrigin.lat, lon: activeOrigin.lon });
+      waypoints.push({
+        lat: (activeOrigin.lat + rec.station.lat) / 2,
+        lon: (activeOrigin.lon + rec.station.lon) / 2,
+      });
+      waypoints.push({ lat: rec.station.lat, lon: rec.station.lon });
+    }
+
+    let stepIdx = 0;
+    evaluateRouteProgress(
+      waypoints[0].lat,
+      waypoints[0].lon,
+      selectedJourney
+    );
+
+    simIntervalRef.current = setInterval(() => {
+      stepIdx += 1;
+      if (stepIdx >= waypoints.length) {
+        if (simIntervalRef.current) {
+          clearInterval(simIntervalRef.current);
+          simIntervalRef.current = null;
+        }
+        setIsSimulatingRide(false);
+        return;
+      }
+      const pt = waypoints[stepIdx];
+      evaluateRouteProgress(pt.lat, pt.lon, selectedJourney);
+      if (mapRef.current) {
+        mapRef.current.animateCamera(
+          {
+            center: { latitude: pt.lat - 0.003, longitude: pt.lon },
+          },
+          { duration: 600 }
+        );
+      }
+    }, 2200);
   };
 
   const focusMapOnOriginAndStation = useCallback(
@@ -274,6 +594,7 @@ export default function App() {
   );
 
   useEffect(() => {
+    stopAllTracking();
     setSelectedJourney(null);
     fetchRoutes(
       activeOrigin.lat,
@@ -291,6 +612,7 @@ export default function App() {
     targetDate,
     direction,
     fetchRoutes,
+    stopAllTracking,
   ]);
 
   const handleUseMyGps = async () => {
@@ -400,9 +722,10 @@ export default function App() {
     mode: 'bus' | 'walk' | 'scooter',
     busOption?: LiveBusOption
   ) => {
+    stopAllTracking();
     triggerHaptic('light');
     setSelectedStationId(rec.station.id);
-    setShowIntermediateStops(false);
+    setShowIntermediateStops(true);
     setSelectedJourney({
       recommendation: rec,
       mode,
@@ -479,7 +802,6 @@ export default function App() {
     [selectedJourney, recommendations, selectedStationId, sortedRecommendations]
   );
 
-  // Active bus option for map polyline rendering (either user-clicked busOption or station's top bus)
   const activeMapBusOption = useMemo(() => {
     if (selectedJourney) {
       return selectedJourney.mode === 'bus' ? selectedJourney.busOption : null;
@@ -637,12 +959,25 @@ export default function App() {
           </View>
         </Marker>
 
+        {/* Live Tracked Bus / Rider Position Marker on Map */}
+        {liveUserCoords && (
+          <Marker
+            coordinate={{
+              latitude: liveUserCoords.lat,
+              longitude: liveUserCoords.lon,
+            }}
+          >
+            <View style={styles.liveVehicleTrackerPin}>
+              <Ionicons name="bus" size={14} color="#FFFFFF" />
+            </View>
+          </Marker>
+        )}
+
         {/* Boarding & Alighting Stop Markers + Route Polyline */}
         {selectedStationRec && (
           <>
             {activeMapBusOption ? (
               <>
-                {/* Origin Bus Stop Marker */}
                 <Marker
                   coordinate={{
                     latitude: activeMapBusOption.originStopLat,
@@ -659,19 +994,28 @@ export default function App() {
                   </View>
                 </Marker>
 
-                {/* Intermediate Bus Stops Dots when in Active Journey Screen */}
                 {selectedJourney &&
-                  activeMapBusOption.intermediateStops.map((istop) => (
-                    <Marker
-                      key={istop.stopId}
-                      coordinate={{ latitude: istop.lat, longitude: istop.lon }}
-                      anchor={{ x: 0.5, y: 0.5 }}
-                    >
-                      <View style={styles.intermediateStopDot} />
-                    </Marker>
-                  ))}
+                  activeMapBusOption.intermediateStops.map((istop, idx) => {
+                    const isPassed = idx <= currentStopIndex;
+                    return (
+                      <Marker
+                        key={istop.stopId}
+                        coordinate={{
+                          latitude: istop.lat,
+                          longitude: istop.lon,
+                        }}
+                        anchor={{ x: 0.5, y: 0.5 }}
+                      >
+                        <View
+                          style={[
+                            styles.intermediateStopDot,
+                            isPassed && styles.intermediateStopDotPassed,
+                          ]}
+                        />
+                      </Marker>
+                    );
+                  })}
 
-                {/* Walk to bus stop (dashed blue) */}
                 <Polyline
                   coordinates={[
                     { latitude: activeOrigin.lat, longitude: activeOrigin.lon },
@@ -685,7 +1029,6 @@ export default function App() {
                   lineDashPattern={[6, 6]}
                 />
 
-                {/* Bus ride polyline through all intermediate stops */}
                 <Polyline
                   coordinates={[
                     {
@@ -701,7 +1044,6 @@ export default function App() {
                   strokeWidth={5}
                 />
 
-                {/* Final walk from alighting stop to Dankal station */}
                 <Polyline
                   coordinates={[
                     {
@@ -921,6 +1263,26 @@ export default function App() {
             />
           )}
         </BlurView>
+
+        {/* Live Get-Off Alert Floating Banner (Prepare / Get Off Now / Arrived) */}
+        {activeAlertBanner && (
+          <View
+            style={[
+              styles.getOffAlertCard,
+              activeAlertBanner.level === 'prepare' &&
+                styles.getOffAlertPrepare,
+              activeAlertBanner.level === 'get_off' && styles.getOffAlertNow,
+              activeAlertBanner.level === 'done' && styles.getOffAlertDone,
+            ]}
+          >
+            <Text style={[styles.getOffAlertTitle, { textAlign }]}>
+              {activeAlertBanner.title}
+            </Text>
+            <Text style={[styles.getOffAlertBody, { textAlign }]}>
+              {activeAlertBanner.body}
+            </Text>
+          </View>
+        )}
       </SafeAreaView>
 
       {/* 3. Interactive Collapsible / Draggable Native Bottom Sheet */}
@@ -929,10 +1291,7 @@ export default function App() {
       >
         <BlurView intensity={94} tint="dark" style={styles.bottomSheetBlur}>
           {/* Draggable & Tappable Grabber Zone */}
-          <View
-            {...panResponder.panHandlers}
-            style={styles.grabberTouchArea}
-          >
+          <View {...panResponder.panHandlers} style={styles.grabberTouchArea}>
             <View style={styles.sheetGrabber} />
             <TouchableOpacity
               style={styles.collapseChevronBtn}
@@ -951,16 +1310,16 @@ export default function App() {
 
           {selectedJourney ? (
             /* ============================================================
-               ACTIVE TRAVEL / JOURNEY DETAIL SCREEN (When User Taps a Route)
+               ACTIVE TRAVEL / JOURNEY DETAIL SCREEN + LIVE TRACKING
                ============================================================ */
             <View style={{ flex: 1 }}>
-              {/* Journey Top Bar with Back Button */}
               <View
                 style={[styles.journeyTopHeader, { flexDirection: rowDir }]}
               >
                 <TouchableOpacity
                   style={[styles.backBtnPill, { flexDirection: rowDir }]}
                   onPress={() => {
+                    stopAllTracking();
                     triggerHaptic('selection');
                     setSelectedJourney(null);
                   }}
@@ -994,6 +1353,94 @@ export default function App() {
                 contentContainerStyle={styles.cardsScrollContent}
                 showsVerticalScrollIndicator={false}
               >
+                {/* Live Tracking & Get-Off Alert Control Bar */}
+                <View style={styles.trackingControlCard}>
+                  <View
+                    style={[
+                      styles.trackingButtonsRow,
+                      { flexDirection: rowDir },
+                    ]}
+                  >
+                    {!isTrackingRide ? (
+                      <TouchableOpacity
+                        style={[
+                          styles.startTrackingBtn,
+                          { flexDirection: rowDir },
+                        ]}
+                        onPress={handleStartLiveTracking}
+                      >
+                        <Ionicons
+                          name="notifications"
+                          size={16}
+                          color="#FFFFFF"
+                        />
+                        <Text style={styles.startTrackingBtnText}>
+                          {t.startLiveTrackingBtn}
+                        </Text>
+                      </TouchableOpacity>
+                    ) : (
+                      <TouchableOpacity
+                        style={[
+                          styles.stopTrackingBtn,
+                          { flexDirection: rowDir },
+                        ]}
+                        onPress={stopAllTracking}
+                      >
+                        <Ionicons
+                          name="stop-circle"
+                          size={16}
+                          color="#FCA5A5"
+                        />
+                        <Text style={styles.stopTrackingBtnText}>
+                          {t.stopLiveTrackingBtn}
+                        </Text>
+                      </TouchableOpacity>
+                    )}
+
+                    {/* 1-Tap Simulation Button to test live progress & Get-Off Notifications immediately */}
+                    <TouchableOpacity
+                      style={[
+                        styles.simulateBtn,
+                        isSimulatingRide && styles.simulateBtnActive,
+                      ]}
+                      onPress={handleSimulateRide}
+                    >
+                      <Text style={styles.simulateBtnText}>
+                        {t.simulateRideBtn}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {isTrackingRide && (
+                    <View
+                      style={[
+                        styles.trackingStatusStrip,
+                        { flexDirection: rowDir },
+                      ]}
+                    >
+                      <View style={styles.liveGreenPulseDot} />
+                      <Text style={[styles.trackingStatusText, { textAlign }]}>
+                        {selectedJourney.mode === 'bus' &&
+                        selectedJourney.busOption &&
+                        currentStopIndex >= 0
+                          ? t.stopsRemainingLabel.replace(
+                              '{s}',
+                              String(
+                                Math.max(
+                                  0,
+                                  selectedJourney.busOption.intermediateStops
+                                    .length -
+                                    1 -
+                                    currentStopIndex
+                                )
+                              )
+                            )
+                          : t.trackingActiveBanner}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+
                 {selectedJourney.mode === 'bus' && selectedJourney.busOption ? (
                   (() => {
                     const bus = selectedJourney.busOption;
@@ -1017,8 +1464,7 @@ export default function App() {
 
                     return (
                       <View style={styles.journeyCard}>
-                        {/* Urgency Banner at top of Travel Screen */}
-                        {timeMode === 'now' && (
+                        {timeMode === 'now' && !isTrackingRide && (
                           <View
                             style={[
                               styles.urgencyPill,
@@ -1053,16 +1499,32 @@ export default function App() {
                               <View
                                 style={[
                                   styles.timelineCircle,
-                                  { backgroundColor: '#3B82F6' },
+                                  {
+                                    backgroundColor:
+                                      currentStopIndex >= 0
+                                        ? '#10B981'
+                                        : '#3B82F6',
+                                  },
                                 ]}
                               >
                                 <Ionicons
-                                  name="walk"
+                                  name={
+                                    currentStopIndex >= 0
+                                      ? 'checkmark'
+                                      : 'walk'
+                                  }
                                   size={14}
                                   color="#FFFFFF"
                                 />
                               </View>
-                              <View style={styles.timelineConnector} />
+                              <View
+                                style={[
+                                  styles.timelineConnector,
+                                  currentStopIndex >= 0 && {
+                                    backgroundColor: '#10B981',
+                                  },
+                                ]}
+                              />
                             </View>
 
                             <View
@@ -1123,7 +1585,7 @@ export default function App() {
                             </View>
                           </View>
 
-                          {/* STEP 2: Board Feeder Bus + Expandable Intermediate Stops */}
+                          {/* STEP 2: Board Feeder Bus + Live Stop-by-Stop Tracker */}
                           <View
                             style={[
                               styles.timelineStepRow,
@@ -1225,17 +1687,29 @@ export default function App() {
                                     const isLast =
                                       sIdx ===
                                       bus.intermediateStops.length - 1;
+                                    const isPassed = sIdx < currentStopIndex;
+                                    const isCurrent = sIdx === currentStopIndex;
+                                    const isNext =
+                                      isTrackingRide &&
+                                      sIdx === currentStopIndex + 1;
+
                                     return (
                                       <View
                                         key={`${istop.stopId}_${sIdx}`}
                                         style={[
                                           styles.intermediateStopRow,
+                                          isCurrent &&
+                                            styles.intermediateStopRowCurrent,
                                           { flexDirection: rowDir },
                                         ]}
                                       >
                                         <View
                                           style={[
                                             styles.intermediateBullet,
+                                            isPassed &&
+                                              styles.intermediateBulletPassed,
+                                            isCurrent &&
+                                              styles.intermediateBulletCurrent,
                                             isLast &&
                                               styles.intermediateBulletLast,
                                           ]}
@@ -1243,6 +1717,10 @@ export default function App() {
                                         <Text
                                           style={[
                                             styles.intermediateStopName,
+                                            isPassed &&
+                                              styles.intermediateStopNamePassed,
+                                            isCurrent &&
+                                              styles.intermediateStopNameCurrent,
                                             isLast &&
                                               styles.intermediateStopNameLast,
                                             { textAlign },
@@ -1250,10 +1728,35 @@ export default function App() {
                                         >
                                           {isRTL ? istop.nameHe : istop.nameEn}
                                         </Text>
-                                        <Text style={styles.intermediateMinText}>
-                                          +{istop.minutesFromBoarding}{' '}
-                                          {t.minUnit}
-                                        </Text>
+
+                                        {isLast ? (
+                                          <View style={styles.getOffHereBadge}>
+                                            <Text
+                                              style={styles.getOffHereBadgeText}
+                                            >
+                                              {t.getOffHereBadge}
+                                            </Text>
+                                          </View>
+                                        ) : isCurrent ? (
+                                          <Text
+                                            style={styles.liveStopStatusTag}
+                                          >
+                                            🚌 {t.now}
+                                          </Text>
+                                        ) : isNext ? (
+                                          <Text
+                                            style={styles.nextStopStatusTag}
+                                          >
+                                            {t.nextStopStatus}
+                                          </Text>
+                                        ) : (
+                                          <Text
+                                            style={styles.intermediateMinText}
+                                          >
+                                            +{istop.minutesFromBoarding}{' '}
+                                            {t.minUnit}
+                                          </Text>
+                                        )}
                                       </View>
                                     );
                                   })}
@@ -1385,7 +1888,6 @@ export default function App() {
                     );
                   })()
                 ) : (
-                  /* Walk or Scooter Direct Journey Card */
                   <View style={styles.journeyCard}>
                     <Text style={[styles.timelineTitle, { textAlign }]}>
                       {selectedJourney.mode === 'scooter'
@@ -1431,7 +1933,6 @@ export default function App() {
                DEFAULT K-STATIONS COMPARISON LIST
                ============================================================ */
             <View style={{ flex: 1 }}>
-              {/* Sheet Controls Header: k Selector + Sort Toggle + Refresh */}
               <View style={[styles.sheetHeaderRow, { flexDirection: rowDir }]}>
                 <View style={[styles.kGroup, { flexDirection: rowDir }]}>
                   <Text style={styles.kTitle}>{t.kStationsLabel}</Text>
@@ -1513,7 +2014,6 @@ export default function App() {
                 </Text>
               ) : null}
 
-              {/* Scrollable Station Cards inside the Sheet */}
               <ScrollView
                 style={styles.cardsScroll}
                 contentContainerStyle={styles.cardsScrollContent}
@@ -1549,7 +2049,6 @@ export default function App() {
                         isFastest && styles.stationCardFastest,
                       ]}
                     >
-                      {/* Top Row: Station Name + Lines + Fastest Badge */}
                       <View
                         style={[
                           styles.cardHeaderRow,
@@ -1608,7 +2107,6 @@ export default function App() {
                         </View>
                       </View>
 
-                      {/* Tappable Walk & Scooter Strip */}
                       <View style={[styles.modesBar, { flexDirection: rowDir }]}>
                         <TouchableOpacity
                           style={[
@@ -1641,7 +2139,6 @@ export default function App() {
                         </TouchableOpacity>
                       </View>
 
-                      {/* Feeder Buses List (Each Bus Option Opens the Travel Screen on Tap!) */}
                       {rec.liveBusOptions.length === 0 ? (
                         <View style={styles.emptyBusBox}>
                           <Text style={[styles.emptyBusText, { textAlign }]}>
@@ -1996,13 +2493,31 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  liveVehicleTrackerPin: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#10B981',
+    borderWidth: 2.5,
+    borderColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.45,
+    shadowRadius: 5,
+  },
   intermediateStopDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 3.5,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
     backgroundColor: '#93C5FD',
     borderWidth: 1.5,
     borderColor: '#1E3A8A',
+  },
+  intermediateStopDotPassed: {
+    backgroundColor: '#10B981',
+    borderColor: '#064E3B',
   },
   stationMapPin: {
     backgroundColor: 'rgba(17, 24, 39, 0.94)',
@@ -2068,6 +2583,7 @@ const styles = StyleSheet.create({
     right: 12,
     paddingTop:
       Platform.OS === 'android' ? (StatusBar.currentHeight || 24) + 6 : 4,
+    gap: 8,
   },
   topBlurCard: {
     borderRadius: 18,
@@ -2077,6 +2593,39 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255, 255, 255, 0.12)',
     backgroundColor: 'rgba(15, 23, 42, 0.65)',
     gap: 8,
+  },
+  getOffAlertCard: {
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderWidth: 1.5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+    gap: 3,
+  },
+  getOffAlertPrepare: {
+    backgroundColor: 'rgba(120, 53, 15, 0.96)',
+    borderColor: '#F59E0B',
+  },
+  getOffAlertNow: {
+    backgroundColor: 'rgba(127, 29, 29, 0.97)',
+    borderColor: '#EF4444',
+  },
+  getOffAlertDone: {
+    backgroundColor: 'rgba(6, 78, 59, 0.96)',
+    borderColor: '#10B981',
+  },
+  getOffAlertTitle: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  getOffAlertBody: {
+    color: '#F1F5F9',
+    fontSize: 12,
+    fontWeight: '600',
   },
   topHeaderRow: {
     alignItems: 'center',
@@ -2598,6 +3147,82 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '800',
   },
+  trackingControlCard: {
+    backgroundColor: 'rgba(17, 24, 39, 0.95)',
+    borderRadius: 14,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(59, 130, 246, 0.35)',
+    gap: 8,
+  },
+  trackingButtonsRow: {
+    alignItems: 'center',
+    gap: 8,
+  },
+  startTrackingBtn: {
+    flex: 1,
+    backgroundColor: '#2563EB',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  startTrackingBtnText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  stopTrackingBtn: {
+    flex: 1,
+    backgroundColor: 'rgba(127, 29, 29, 0.85)',
+    borderWidth: 1,
+    borderColor: '#EF4444',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  stopTrackingBtnText: {
+    color: '#FECACA',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  simulateBtn: {
+    backgroundColor: 'rgba(30, 41, 59, 0.95)',
+    borderWidth: 1,
+    borderColor: '#60A5FA',
+    paddingVertical: 10,
+    paddingHorizontal: 11,
+    borderRadius: 11,
+  },
+  simulateBtnActive: {
+    backgroundColor: '#1D4ED8',
+  },
+  simulateBtnText: {
+    color: '#BFDBFE',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  trackingStatusStrip: {
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 4,
+  },
+  liveGreenPulseDot: {
+    width: 9,
+    height: 9,
+    borderRadius: 4.5,
+    backgroundColor: '#10B981',
+  },
+  trackingStatusText: {
+    color: '#6EE7B7',
+    fontSize: 12,
+    fontWeight: '700',
+  },
   journeyCard: {
     backgroundColor: 'rgba(17, 24, 39, 0.94)',
     borderRadius: 18,
@@ -2714,29 +3339,75 @@ const styles = StyleSheet.create({
   intermediateStopRow: {
     alignItems: 'center',
     gap: 8,
+    paddingVertical: 2,
+    paddingHorizontal: 4,
+    borderRadius: 6,
+  },
+  intermediateStopRowCurrent: {
+    backgroundColor: 'rgba(37, 99, 235, 0.22)',
   },
   intermediateBullet: {
-    width: 7,
-    height: 7,
-    borderRadius: 3.5,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
     backgroundColor: '#64748B',
   },
-  intermediateBulletLast: {
+  intermediateBulletPassed: {
     backgroundColor: '#10B981',
+  },
+  intermediateBulletCurrent: {
+    backgroundColor: '#60A5FA',
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  intermediateBulletLast: {
+    backgroundColor: '#EF4444',
   },
   intermediateStopName: {
     flex: 1,
     color: '#CBD5E1',
     fontSize: 12,
   },
+  intermediateStopNamePassed: {
+    color: '#64748B',
+    textDecorationLine: 'line-through',
+  },
+  intermediateStopNameCurrent: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+  },
   intermediateStopNameLast: {
-    color: '#6EE7B7',
-    fontWeight: '700',
+    color: '#FCA5A5',
+    fontWeight: '800',
   },
   intermediateMinText: {
     color: '#64748B',
     fontSize: 11,
     fontWeight: '600',
+  },
+  liveStopStatusTag: {
+    color: '#60A5FA',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  nextStopStatusTag: {
+    color: '#FCD34D',
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  getOffHereBadge: {
+    backgroundColor: 'rgba(239, 68, 68, 0.25)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: '#EF4444',
+  },
+  getOffHereBadgeText: {
+    color: '#FCA5A5',
+    fontSize: 10,
+    fontWeight: '800',
   },
   footerInfo: {
     color: '#6B7280',
