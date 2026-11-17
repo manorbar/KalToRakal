@@ -1,0 +1,26 @@
+{
+  "expo": {
+    "name": "KalToRakal (קל לרק\"ל)",
+    "slug": "kal-to-rakal",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "il.co.kaltorakal.app",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "KalToRakal uses your location to find the nearest Dankal stations and live feeder buses."
+      }
+    },
+    "android": {
+      "package": "il.co.kaltorakal.app",
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION"
+      ]
+    },
+    "web": {
+      "bundler": "metro"
+    }
+  }
+}
