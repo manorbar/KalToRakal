@@ -144,7 +144,7 @@ export default function App() {
 
   return (
     <SafeAreaView style={[styles.safeArea, dirStyle]}>
-      <StatusBar barStyle="light-content" backgroundColor="#0B0F19" />
+      <StatusBar barStyle="light-content" />
 
       {/* Top Header */}
       <View style={[styles.header, { flexDirection: rowDir }]}>
