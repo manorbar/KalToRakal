@@ -124,7 +124,6 @@ export default function App() {
 
   const [lang, setLang] = useState<Language>('he');
   const [k, setK] = useState<number>(3);
-  const [sortBy, setSortBy] = useState<'fastest' | 'distance'>('fastest');
   const [direction, setDirection] = useState<DankalDirection>('any');
   const [timeMode, setTimeMode] = useState<TimeMode>('now');
   const [targetDate, setTargetDate] = useState<Date>(() => new Date());
@@ -775,13 +774,9 @@ export default function App() {
 
   const sortedRecommendations = useMemo(() => {
     const copy = [...recommendations];
-    if (sortBy === 'fastest') {
-      copy.sort((a, b) => a.bestTotalMinutes - b.bestTotalMinutes);
-    } else {
-      copy.sort((a, b) => a.aerialMeters - b.aerialMeters);
-    }
+    copy.sort((a, b) => a.bestTotalMinutes - b.bestTotalMinutes);
     return copy;
-  }, [recommendations, sortBy]);
+  }, [recommendations]);
 
   const overallFastestStationId = useMemo(() => {
     if (recommendations.length === 0) return null;
@@ -1935,55 +1930,26 @@ export default function App() {
                   ))}
                 </View>
 
-                <View
-                  style={[styles.rightControlsGroup, { flexDirection: rowDir }]}
+                <TouchableOpacity
+                  style={styles.iconRefreshBtn}
+                  onPress={() => {
+                    triggerHaptic('light');
+                    fetchRoutes(
+                      activeOrigin.lat,
+                      activeOrigin.lon,
+                      k,
+                      timeMode,
+                      targetDate,
+                      direction
+                    );
+                  }}
                 >
-                  <TouchableOpacity
-                    style={[styles.sortChip, { flexDirection: rowDir }]}
-                    onPress={() => {
-                      triggerHaptic('selection');
-                      setSortBy((prev) =>
-                        prev === 'fastest' ? 'distance' : 'fastest'
-                      );
-                    }}
-                  >
-                    <Ionicons
-                      name={
-                        sortBy === 'fastest'
-                          ? 'flash-outline'
-                          : 'navigate-outline'
-                      }
-                      size={13}
-                      color="#64D2FF"
-                    />
-                    <Text style={styles.sortChipText}>
-                      {sortBy === 'fastest'
-                        ? t.sortByFastest
-                        : t.sortByDistance}
-                    </Text>
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={styles.iconRefreshBtn}
-                    onPress={() => {
-                      triggerHaptic('light');
-                      fetchRoutes(
-                        activeOrigin.lat,
-                        activeOrigin.lon,
-                        k,
-                        timeMode,
-                        targetDate,
-                        direction
-                      );
-                    }}
-                  >
-                    {loading ? (
-                      <ActivityIndicator size="small" color="#64D2FF" />
-                    ) : (
-                      <Ionicons name="refresh" size={16} color="#F8FAFC" />
-                    )}
-                  </TouchableOpacity>
-                </View>
+                  {loading ? (
+                    <ActivityIndicator size="small" color="#64D2FF" />
+                  ) : (
+                    <Ionicons name="refresh" size={16} color="#F8FAFC" />
+                  )}
+                </TouchableOpacity>
               </View>
 
               {gpsError ? (
