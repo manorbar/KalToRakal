@@ -1,10 +1,12 @@
 import rawData from '../data/dankal_data.json';
 import {
   DankalDataset,
+  DankalDirection,
   DankalStation,
   LiveBusOption,
   StationRecommendation,
   TimeMode,
+  UrgencyLevel,
 } from '../types/transit';
 
 const dataset = rawData as unknown as DankalDataset;
@@ -85,6 +87,56 @@ function formatMinFromMidnight(totalMin: number): string {
 
 function dateToMinutesFromMidnight(d: Date): number {
   return d.getHours() * 60 + d.getMinutes();
+}
+
+/**
+ * Extracts a clean entrance / platform hint from the alighting bus stop name & distance:
+ * e.g. "ת.רק''ל קרליבך/דרך מנחם בגין A" -> "כניסה A" / "Entrance A"
+ */
+function parseEntranceHint(
+  alightStopNameHe: string,
+  walkFromBusMeters: number
+): { he: string | null; en: string | null } {
+  const letterMatch = alightStopNameHe.match(/\b([A-D])$/);
+  if (letterMatch) {
+    const letter = letterMatch[1];
+    return {
+      he: `כניסה ${letter}`,
+      en: `Entrance ${letter}`,
+    };
+  }
+  if (walkFromBusMeters <= 65) {
+    return {
+      he: 'צמוד לכניסה',
+      en: 'Direct to entrance',
+    };
+  }
+  return { he: null, en: null };
+}
+
+function computeUrgency(spareMinutesToWalk: number): UrgencyLevel {
+  if (spareMinutesToWalk >= 3) return 'chill';
+  if (spareMinutesToWalk >= 0) return 'leave_now';
+  return 'brisk';
+}
+
+function stationMatchesDirection(
+  station: DankalStation,
+  direction: DankalDirection
+): boolean {
+  if (direction === 'any' || direction === 'to_tlv_batyam') {
+    // Every Dankal station (R1, R2, R3) has trains heading toward Tel Aviv / Elifelet / Bat Yam
+    return true;
+  }
+  if (direction === 'to_pt') {
+    // Only stations served by R1 can take you directly to Petah Tikva CBS / Jabotinsky PT
+    return station.lines.includes('R1');
+  }
+  if (direction === 'to_kiryat_arye') {
+    // Only stations served by R2 or R3 go to Kiryat Arye / Em HaMoshavot
+    return station.lines.includes('R2') || station.lines.includes('R3');
+  }
+  return true;
 }
 
 function findCandidateFeederConnections(
@@ -225,32 +277,31 @@ async function fetchLiveArrivalsForStopCode(
   return [];
 }
 
-/**
- * Supports 3 Time Modes:
- * - 'now': Uses live MoT SIRI arrivals (`curlbus.app`) with GTFS timetable fallback.
- * - 'depart_at': Computes optimal routes starting at `targetDate` (live SIRI if within 25 min of now, else GTFS schedule).
- * - 'arrive_by': Works backwards from `targetDate` so the user reaches the Dankal platform on or before `targetDate`.
- */
 export async function computeRoutesToNearestDankalStations(
   userLat: number,
   userLon: number,
   k: number = 3,
   timeMode: TimeMode = 'now',
-  targetDate: Date = new Date()
+  targetDate: Date = new Date(),
+  direction: DankalDirection = 'any'
 ): Promise<StationRecommendation[]> {
   const now = new Date();
   const effectiveDate = timeMode === 'now' ? now : targetDate;
   const targetMinOfDay = dateToMinutesFromMidnight(effectiveDate);
   const diffFromNowMinutes = (effectiveDate.getTime() - now.getTime()) / 60000;
 
-  // Use live SIRI if mode is 'now' or if target departure is within the next 20 minutes
   const useLiveSiri =
     timeMode === 'now' ||
     (timeMode === 'depart_at' &&
       diffFromNowMinutes >= -3 &&
       diffFromNowMinutes <= 20);
 
-  const stationsWithDist = dataset.stations
+  // Filter stations by requested direction on the Red Line
+  const candidateStations = dataset.stations.filter((st) =>
+    stationMatchesDirection(st, direction)
+  );
+
+  const stationsWithDist = candidateStations
     .map((station) => {
       const aerialMeters = Math.round(
         haversineMeters(userLat, userLon, station.lat, station.lon)
@@ -314,8 +365,12 @@ export async function computeRoutesToNearestDankalStations(
         he: 'תחבורה ציבורית',
         en: 'Public Transit',
       };
+      const entranceHint = parseEntranceHint(
+        alightStop.he,
+        m.walkFromBusMeters
+      );
 
-      // 1. Live SIRI arrivals (if in live window)
+      // 1. Live SIRI arrivals
       if (useLiveSiri) {
         const visits = liveVisitsByStopCode.get(m.originStopCode) || [];
         for (const v of visits) {
@@ -332,6 +387,9 @@ export async function computeRoutesToNearestDankalStations(
           if (waitMinRaw < walkToBusMinutes - 1 || waitMinRaw > 45) continue;
 
           const waitMinutes = Math.max(0, waitMinRaw);
+          const spareMinutesToWalk = waitMinRaw - walkToBusMinutes;
+          const urgency = computeUrgency(spareMinutesToWalk);
+
           const busArrivalMinOfDay = dateToMinutesFromMidnight(etaDate);
           const leaveHomeMinOfDay = busArrivalMinOfDay - walkToBusMinutes;
           const arriveStationMinOfDay =
@@ -360,6 +418,10 @@ export async function computeRoutesToNearestDankalStations(
             walkToBusMeters: m.walkToBusMeters,
             walkToBusMinutes,
             waitMinutes,
+            spareMinutesToWalk,
+            urgency,
+            nextBackupBusMinutesLater: null,
+            nextBackupBusLine: null,
             leaveHomeFormatted: formatMinFromMidnight(leaveHomeMinOfDay),
             etaFormatted: etaHHMM,
             arriveStationFormatted: formatMinFromMidnight(
@@ -371,6 +433,8 @@ export async function computeRoutesToNearestDankalStations(
             alightStopNameEn: alightStop.en,
             alightStopLat: alightStop.lat,
             alightStopLon: alightStop.lon,
+            entranceHintHe: entranceHint.he,
+            entranceHintEn: entranceHint.en,
             walkFromBusMeters: m.walkFromBusMeters,
             walkFromBusMinutes,
             totalMinutes,
@@ -379,7 +443,7 @@ export async function computeRoutesToNearestDankalStations(
         }
       }
 
-      // 2. Scheduled GTFS timetable calculation (used for 'depart_at', 'arrive_by', or fallback when no live SIRI)
+      // 2. Scheduled GTFS timetable calculation
       if (!useLiveSiri || liveBusOptions.length === 0) {
         for (const depMin of m.deps) {
           const busAtOriginMin = Math.round(depMin + m.originOffsetMinutes);
@@ -388,19 +452,22 @@ export async function computeRoutesToNearestDankalStations(
           const leaveHomeMin = busAtOriginMin - walkToBusMinutes;
 
           if (timeMode === 'arrive_by') {
-            // Must arrive at the Dankal station on or before targetMinOfDay, and at most 45 mins before
             const earlyMargin = targetMinOfDay - arriveStationMin;
             if (earlyMargin < 0 || earlyMargin > 45) continue;
           } else {
-            // 'depart_at' or fallback 'now': user leaves at or after targetMinOfDay
             const waitMin = busAtOriginMin - targetMinOfDay;
             if (waitMin < walkToBusMinutes - 1 || waitMin > 45) continue;
           }
 
+          const waitMinRaw = busAtOriginMin - targetMinOfDay;
           const waitMinutes =
             timeMode === 'arrive_by'
               ? Math.max(0, targetMinOfDay - arriveStationMin)
-              : Math.max(0, busAtOriginMin - targetMinOfDay);
+              : Math.max(0, waitMinRaw);
+
+          const spareMinutesToWalk =
+            timeMode === 'arrive_by' ? 3 : waitMinRaw - walkToBusMinutes;
+          const urgency = computeUrgency(spareMinutesToWalk);
 
           const totalMinutes =
             timeMode === 'arrive_by'
@@ -428,6 +495,10 @@ export async function computeRoutesToNearestDankalStations(
             walkToBusMeters: m.walkToBusMeters,
             walkToBusMinutes,
             waitMinutes,
+            spareMinutesToWalk,
+            urgency,
+            nextBackupBusMinutesLater: null,
+            nextBackupBusLine: null,
             leaveHomeFormatted: formatMinFromMidnight(leaveHomeMin),
             etaFormatted: etaHHMM,
             arriveStationFormatted: formatMinFromMidnight(arriveStationMin),
@@ -437,6 +508,8 @@ export async function computeRoutesToNearestDankalStations(
             alightStopNameEn: alightStop.en,
             alightStopLat: alightStop.lat,
             alightStopLon: alightStop.lon,
+            entranceHintHe: entranceHint.he,
+            entranceHintEn: entranceHint.en,
             walkFromBusMeters: m.walkFromBusMeters,
             walkFromBusMinutes,
             totalMinutes,
@@ -447,12 +520,26 @@ export async function computeRoutesToNearestDankalStations(
     }
 
     if (timeMode === 'arrive_by') {
-      // For 'arrive_by', sort by latest departure from home that still makes the target arrival time!
       liveBusOptions.sort((a, b) =>
         b.leaveHomeFormatted.localeCompare(a.leaveHomeFormatted)
       );
     } else {
       liveBusOptions.sort((a, b) => a.totalMinutes - b.totalMinutes);
+    }
+
+    // Annotate backup bus info (so if option #1 is 'brisk' or 'leave_now', user sees when the next bus is!)
+    for (let i = 0; i < liveBusOptions.length - 1; i++) {
+      const cur = liveBusOptions[i];
+      const next = liveBusOptions.find(
+        (cand, idx) => idx > i && cand.waitMinutes > cur.waitMinutes
+      );
+      if (next) {
+        cur.nextBackupBusMinutesLater = Math.max(
+          1,
+          next.waitMinutes - cur.waitMinutes
+        );
+        cur.nextBackupBusLine = next.lineName;
+      }
     }
 
     const topBusOptions = liveBusOptions.slice(0, 4);

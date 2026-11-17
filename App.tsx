@@ -23,10 +23,12 @@ import * as Haptics from 'expo-haptics';
 import * as Location from 'expo-location';
 import { Ionicons } from '@expo/vector-icons';
 import {
+  DankalDirection,
   Language,
   StationRecommendation,
   LiveBusOption,
   TimeMode,
+  UrgencyLevel,
 } from './src/types/transit';
 import { STRINGS, PRESET_ORIGINS, PresetOrigin } from './src/i18n/strings';
 import {
@@ -35,7 +37,8 @@ import {
   getRedLinePolylines,
 } from './src/services/routingEngine';
 
-const NativeSegmentedControl = SegmentedControl as unknown as React.ComponentType<any>;
+const NativeSegmentedControl =
+  SegmentedControl as unknown as React.ComponentType<any>;
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 export default function App() {
@@ -44,6 +47,7 @@ export default function App() {
   const [lang, setLang] = useState<Language>('he');
   const [k, setK] = useState<number>(3);
   const [sortBy, setSortBy] = useState<'fastest' | 'distance'>('fastest');
+  const [direction, setDirection] = useState<DankalDirection>('any');
   const [timeMode, setTimeMode] = useState<TimeMode>('now');
   const [targetDate, setTargetDate] = useState<Date>(() => new Date());
   const [showTimePicker, setShowTimePicker] = useState<boolean>(false);
@@ -80,7 +84,9 @@ export default function App() {
   const allStations = useMemo(() => getAllStations(), []);
   const { r1Coords, r2BranchCoords } = useMemo(() => getRedLinePolylines(), []);
 
-  const triggerHaptic = (type: 'selection' | 'light' | 'success' = 'selection') => {
+  const triggerHaptic = (
+    type: 'selection' | 'light' | 'success' = 'selection'
+  ) => {
     if (Platform.OS === 'web') return;
     if (type === 'selection') {
       Haptics.selectionAsync();
@@ -100,7 +106,6 @@ export default function App() {
       const lonDelta = Math.max(0.014, Math.abs(origLon - stLon) * 2.1);
       mapRef.current.animateToRegion(
         {
-          // Offset latitude slightly south so markers appear in upper visible half above sheet
           latitude: midLat - latDelta * 0.18,
           longitude: midLon,
           latitudeDelta: latDelta,
@@ -118,7 +123,8 @@ export default function App() {
       lon: number,
       countK: number,
       mode: TimeMode,
-      dateVal: Date
+      dateVal: Date,
+      dirVal: DankalDirection
     ) => {
       setLoading(true);
       try {
@@ -127,7 +133,8 @@ export default function App() {
           lon,
           countK,
           mode,
-          dateVal
+          dateVal,
+          dirVal
         );
         setRecommendations(res);
         if (res.length > 0) {
@@ -159,8 +166,23 @@ export default function App() {
   );
 
   useEffect(() => {
-    fetchRoutes(activeOrigin.lat, activeOrigin.lon, k, timeMode, targetDate);
-  }, [activeOrigin.lat, activeOrigin.lon, k, timeMode, targetDate, fetchRoutes]);
+    fetchRoutes(
+      activeOrigin.lat,
+      activeOrigin.lon,
+      k,
+      timeMode,
+      targetDate,
+      direction
+    );
+  }, [
+    activeOrigin.lat,
+    activeOrigin.lon,
+    k,
+    timeMode,
+    targetDate,
+    direction,
+    fetchRoutes,
+  ]);
 
   const handleUseMyGps = async () => {
     triggerHaptic('light');
@@ -221,6 +243,7 @@ export default function App() {
       setShowTimePicker(false);
     } else {
       if (Platform.OS === 'android') {
+        setAndroidPickerMode('time');
         setShowTimePicker(true);
       }
     }
@@ -239,25 +262,76 @@ export default function App() {
     }
   };
 
-  const openNativeMapsDirections = (
-    destLat: number,
-    destLon: number,
-    label: string
-  ) => {
+  /**
+   * Opens Apple Maps / Google Maps walking directions to the bus boarding stop
+   * (when a bus route is best) OR transit/walking directions to the Dankal station.
+   */
+  const openSmartNavigation = (rec: StationRecommendation) => {
     triggerHaptic('light');
+    const bestBus = rec.liveBusOptions[0];
+    const shouldWalkToBusStop = rec.bestMode === 'bus' && Boolean(bestBus);
+
+    const destLat = shouldWalkToBusStop
+      ? bestBus.originStopLat
+      : rec.station.lat;
+    const destLon = shouldWalkToBusStop
+      ? bestBus.originStopLon
+      : rec.station.lon;
+    const label = shouldWalkToBusStop
+      ? isRTL
+        ? bestBus.originStopNameHe
+        : bestBus.originStopNameEn
+      : isRTL
+      ? rec.station.name_he
+      : rec.station.name_en;
+
     const encodedLabel = encodeURIComponent(label);
     const url = Platform.select({
-      ios: `maps://?saddr=${activeOrigin.lat},${activeOrigin.lon}&daddr=${destLat},${destLon}&dirflg=r&q=${encodedLabel}`,
-      android: `google.navigation:q=${destLat},${destLon}&mode=r`,
-      default: `https://www.google.com/maps/dir/?api=1&origin=${activeOrigin.lat},${activeOrigin.lon}&destination=${destLat},${destLon}&travelmode=transit`,
+      ios: `maps://?saddr=${activeOrigin.lat},${activeOrigin.lon}&daddr=${destLat},${destLon}&dirflg=w&q=${encodedLabel}`,
+      android: `google.navigation:q=${destLat},${destLon}&mode=w`,
+      default: `https://www.google.com/maps/dir/?api=1&origin=${activeOrigin.lat},${activeOrigin.lon}&destination=${destLat},${destLon}&travelmode=walking`,
     });
     if (url) {
       Linking.openURL(url).catch(() => {
         Linking.openURL(
-          `https://www.google.com/maps/dir/?api=1&origin=${activeOrigin.lat},${activeOrigin.lon}&destination=${destLat},${destLon}&travelmode=transit`
+          `https://www.google.com/maps/dir/?api=1&origin=${activeOrigin.lat},${activeOrigin.lon}&destination=${destLat},${destLon}&travelmode=walking`
         );
       });
     }
+  };
+
+  const formatUrgencyBadge = (bus: LiveBusOption): {
+    label: string;
+    bg: string;
+    border: string;
+    text: string;
+  } => {
+    const u: UrgencyLevel = bus.urgency;
+    if (u === 'chill') {
+      return {
+        label: `🟢 ${t.urgencyChill.replace(
+          '{m}',
+          String(Math.max(2, bus.spareMinutesToWalk))
+        )}`,
+        bg: 'rgba(16, 185, 129, 0.16)',
+        border: 'rgba(16, 185, 129, 0.45)',
+        text: '#6EE7B7',
+      };
+    }
+    if (u === 'leave_now') {
+      return {
+        label: `🟡 ${t.urgencyLeaveNow}`,
+        bg: 'rgba(245, 158, 11, 0.18)',
+        border: 'rgba(245, 158, 11, 0.5)',
+        text: '#FCD34D',
+      };
+    }
+    return {
+      label: `🔴 ${t.urgencyBrisk}`,
+      bg: 'rgba(239, 68, 68, 0.2)',
+      border: 'rgba(239, 68, 68, 0.55)',
+      text: '#FCA5A5',
+    };
   };
 
   const sortedRecommendations = useMemo(() => {
@@ -299,6 +373,16 @@ export default function App() {
     return Math.max(0, ordered.indexOf(timeMode));
   }, [timeMode, isRTL]);
 
+  const directionOptions: { id: DankalDirection; label: string }[] = useMemo(
+    () => [
+      { id: 'any', label: t.dirAny },
+      { id: 'to_tlv_batyam', label: t.dirTlvBatYam },
+      { id: 'to_pt', label: t.dirPetahTikva },
+      { id: 'to_kiryat_arye', label: t.dirKiryatArye },
+    ],
+    [t]
+  );
+
   const formattedTargetTime = useMemo(() => {
     return targetDate.toLocaleTimeString([], {
       hour: '2-digit',
@@ -326,7 +410,6 @@ export default function App() {
           longitudeDelta: 0.035,
         }}
       >
-        {/* Red Line Corridor Polylines (R1 & R2) */}
         {r1Coords.length > 1 && (
           <Polyline
             coordinates={r1Coords}
@@ -342,7 +425,6 @@ export default function App() {
           />
         )}
 
-        {/* Subtle dots for all 34 Dankal stations along the corridor */}
         {allStations.map((st) => {
           const isNearestK = recommendations.some(
             (r) => r.station.id === st.id
@@ -360,7 +442,6 @@ export default function App() {
           );
         })}
 
-        {/* Highlighted Pins for the k Nearest Dankal Stations */}
         {recommendations.map((rec) => {
           const isFastest = rec.station.id === overallFastestStationId;
           const isSelected = rec.station.id === selectedStationId;
@@ -408,7 +489,6 @@ export default function App() {
           );
         })}
 
-        {/* User / Active Origin Marker */}
         <Marker
           coordinate={{
             latitude: activeOrigin.lat,
@@ -421,13 +501,11 @@ export default function App() {
           </View>
         </Marker>
 
-        {/* Visual Route Line from User -> Selected Station (via Best Feeder Bus or Direct Walk) */}
         {selectedStationRec && (
           <>
             {selectedStationRec.liveBusOptions.length > 0 &&
             selectedStationRec.bestMode === 'bus' ? (
               <>
-                {/* Walk to bus stop (dashed blue) */}
                 <Polyline
                   coordinates={[
                     { latitude: activeOrigin.lat, longitude: activeOrigin.lon },
@@ -442,7 +520,6 @@ export default function App() {
                   strokeWidth={3}
                   lineDashPattern={[6, 6]}
                 />
-                {/* Bus ride to station (solid bright blue) */}
                 <Polyline
                   coordinates={[
                     {
@@ -486,11 +563,7 @@ export default function App() {
 
       {/* 2. Floating Native Frosted-Glass Top Overlay */}
       <SafeAreaView style={styles.topFloatingSafe} pointerEvents="box-none">
-        <BlurView
-          intensity={85}
-          tint="dark"
-          style={styles.topBlurCard}
-        >
+        <BlurView intensity={85} tint="dark" style={styles.topBlurCard}>
           {/* App Bar + Origin Selector Pill + Language Toggle */}
           <View style={[styles.topHeaderRow, { flexDirection: rowDir }]}>
             <TouchableOpacity
@@ -549,12 +622,50 @@ export default function App() {
             </TouchableOpacity>
           </View>
 
+          {/* Direction Filter Pills (All | TLV/Bat Yam | Petah Tikva R1 | Kiryat Arye R2/R3) */}
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={[
+              styles.directionScrollRow,
+              { flexDirection: rowDir },
+            ]}
+          >
+            {directionOptions.map((opt) => {
+              const active = direction === opt.id;
+              return (
+                <TouchableOpacity
+                  key={opt.id}
+                  style={[
+                    styles.directionChip,
+                    active && styles.directionChipActive,
+                  ]}
+                  onPress={() => {
+                    triggerHaptic('selection');
+                    setDirection(opt.id);
+                  }}
+                >
+                  <Text
+                    style={[
+                      styles.directionChipText,
+                      active && styles.directionChipTextActive,
+                    ]}
+                  >
+                    {opt.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+
           {/* Native Segmented Control: Leave Now | Depart At | Arrive By */}
           <View style={styles.segmentedWrapper}>
             <NativeSegmentedControl
               values={segmentedValues}
               selectedIndex={segmentedSelectedIndex}
-              onChange={(event: { nativeEvent: { selectedSegmentIndex: number } }) => {
+              onChange={(event: {
+                nativeEvent: { selectedSegmentIndex: number };
+              }) => {
                 handleTimeModeChange(event.nativeEvent.selectedSegmentIndex);
               }}
               appearance="dark"
@@ -569,7 +680,7 @@ export default function App() {
             />
           </View>
 
-          {/* Native Date + Time Picker Row (Shown when Depart At or Arrive By is selected) */}
+          {/* Native Date + Time Picker Row */}
           {timeMode !== 'now' && (
             <View style={[styles.timePickerRow, { flexDirection: rowDir }]}>
               <View
@@ -590,7 +701,9 @@ export default function App() {
                   onChange={handleTimePickerChange}
                 />
               ) : (
-                <View style={[styles.androidDateTimeRow, { flexDirection: rowDir }]}>
+                <View
+                  style={[styles.androidDateTimeRow, { flexDirection: rowDir }]}
+                >
                   <TouchableOpacity
                     style={styles.androidTimeButton}
                     onPress={() => {
@@ -599,11 +712,14 @@ export default function App() {
                     }}
                   >
                     <Text style={styles.androidTimeButtonText}>
-                      {targetDate.toLocaleDateString(lang === 'he' ? 'he-IL' : 'en-US', {
-                        weekday: 'short',
-                        day: '2-digit',
-                        month: '2-digit',
-                      })}
+                      {targetDate.toLocaleDateString(
+                        lang === 'he' ? 'he-IL' : 'en-US',
+                        {
+                          weekday: 'short',
+                          day: '2-digit',
+                          month: '2-digit',
+                        }
+                      )}
                     </Text>
                   </TouchableOpacity>
                   <TouchableOpacity
@@ -636,12 +752,7 @@ export default function App() {
 
       {/* 3. Native Bottom Sheet Deck */}
       <View style={styles.bottomSheetContainer}>
-        <BlurView
-          intensity={92}
-          tint="dark"
-          style={styles.bottomSheetBlur}
-        >
-          {/* Sheet Grabber Handle */}
+        <BlurView intensity={92} tint="dark" style={styles.bottomSheetBlur}>
           <View style={styles.sheetGrabber} />
 
           {/* Sheet Controls Header: k Selector + Sort Toggle + Refresh */}
@@ -700,7 +811,8 @@ export default function App() {
                     activeOrigin.lon,
                     k,
                     timeMode,
-                    targetDate
+                    targetDate,
+                    direction
                   );
                 }}
               >
@@ -732,6 +844,11 @@ export default function App() {
               const cityName = isRTL
                 ? rec.station.city_he
                 : rec.station.city_en;
+
+              const navBtnLabel =
+                rec.bestMode === 'bus' && rec.liveBusOptions.length > 0
+                  ? t.walkToBusNav
+                  : t.openInMaps;
 
               return (
                 <TouchableOpacity
@@ -803,7 +920,7 @@ export default function App() {
                     </View>
                   </View>
 
-                  {/* Walk & Scooter Strip + Native Map Navigation Button */}
+                  {/* Walk & Scooter Strip + Smart Navigation Button (Routes to Boarding Stop when Bus is Best!) */}
                   <View style={[styles.modesBar, { flexDirection: rowDir }]}>
                     <View
                       style={[
@@ -838,17 +955,11 @@ export default function App() {
                         styles.appleMapsNavBtn,
                         { flexDirection: rowDir },
                       ]}
-                      onPress={() =>
-                        openNativeMapsDirections(
-                          rec.station.lat,
-                          rec.station.lon,
-                          stName
-                        )
-                      }
+                      onPress={() => openSmartNavigation(rec)}
                     >
-                      <Ionicons name="navigate" size={13} color="#FFFFFF" />
+                      <Ionicons name="navigate" size={12} color="#FFFFFF" />
                       <Text style={styles.appleMapsNavBtnText}>
-                        {t.openInMaps}
+                        {navBtnLabel}
                       </Text>
                     </TouchableOpacity>
                   </View>
@@ -863,145 +974,200 @@ export default function App() {
                   ) : (
                     <View style={styles.busListContainer}>
                       {rec.liveBusOptions.map(
-                        (bus: LiveBusOption, bIdx: number) => (
-                          <View
-                            key={bus.id}
-                            style={[
-                              styles.busRowCard,
-                              bIdx === 0 && styles.busRowCardPrimary,
-                            ]}
-                          >
-                            {/* Top Line of Bus Option */}
+                        (bus: LiveBusOption, bIdx: number) => {
+                          const urgencyInfo = formatUrgencyBadge(bus);
+                          const entranceHint = isRTL
+                            ? bus.entranceHintHe
+                            : bus.entranceHintEn;
+
+                          return (
                             <View
+                              key={bus.id}
                               style={[
-                                styles.busRowHeader,
-                                { flexDirection: rowDir },
+                                styles.busRowCard,
+                                bIdx === 0 && styles.busRowCardPrimary,
                               ]}
                             >
+                              {/* Top Line of Bus Option */}
                               <View
                                 style={[
-                                  styles.busBadgeAndTiming,
+                                  styles.busRowHeader,
                                   { flexDirection: rowDir },
                                 ]}
                               >
-                                <View style={styles.busNumPill}>
-                                  <Ionicons
-                                    name="bus"
-                                    size={13}
-                                    color="#FFFFFF"
-                                  />
-                                  <Text style={styles.busNumText}>
-                                    {bus.lineName}
-                                  </Text>
-                                </View>
-
                                 <View
-                                  style={{
-                                    alignItems: isRTL
-                                      ? 'flex-end'
-                                      : 'flex-start',
-                                  }}
+                                  style={[
+                                    styles.busBadgeAndTiming,
+                                    { flexDirection: rowDir },
+                                  ]}
                                 >
-                                  <View
-                                    style={[
-                                      styles.etaLineRow,
-                                      { flexDirection: rowDir },
-                                    ]}
-                                  >
-                                    <View
-                                      style={[
-                                        styles.statusBadge,
-                                        bus.isRealtime
-                                          ? styles.statusBadgeLive
-                                          : styles.statusBadgeSched,
-                                      ]}
-                                    >
-                                      <Text
-                                        style={[
-                                          styles.statusBadgeText,
-                                          bus.isRealtime
-                                            ? styles.statusTextLive
-                                            : styles.statusTextSched,
-                                        ]}
-                                      >
-                                        {bus.isRealtime
-                                          ? `● ${t.liveBadge}`
-                                          : t.scheduledBadge}
-                                      </Text>
-                                    </View>
-
-                                    <Text style={styles.busTimingHeadline}>
-                                      {timeMode === 'now'
-                                        ? bus.waitMinutes <= 0
-                                          ? `${t.now} (${bus.etaFormatted})`
-                                          : `${t.arrivesIn} ${bus.waitMinutes} ${t.minUnit} (${bus.etaFormatted})`
-                                        : `${t.leaveAt}${bus.leaveHomeFormatted} · ${t.boardLine} ${bus.etaFormatted}`}
+                                  <View style={styles.busNumPill}>
+                                    <Ionicons
+                                      name="bus"
+                                      size={13}
+                                      color="#FFFFFF"
+                                    />
+                                    <Text style={styles.busNumText}>
+                                      {bus.lineName}
                                     </Text>
                                   </View>
 
-                                  <Text style={styles.busSubTimeline}>
-                                    {isRTL
-                                      ? bus.agencyNameHe
-                                      : bus.agencyNameEn}{' '}
-                                    • {t.arrivePlatformAt}
-                                    <Text style={styles.busSubTimelineBold}>
-                                      {bus.arriveStationFormatted}
+                                  <View
+                                    style={{
+                                      flex: 1,
+                                      alignItems: isRTL
+                                        ? 'flex-end'
+                                        : 'flex-start',
+                                    }}
+                                  >
+                                    <View
+                                      style={[
+                                        styles.etaLineRow,
+                                        { flexDirection: rowDir },
+                                      ]}
+                                    >
+                                      <View
+                                        style={[
+                                          styles.statusBadge,
+                                          bus.isRealtime
+                                            ? styles.statusBadgeLive
+                                            : styles.statusBadgeSched,
+                                        ]}
+                                      >
+                                        <Text
+                                          style={[
+                                            styles.statusBadgeText,
+                                            bus.isRealtime
+                                              ? styles.statusTextLive
+                                              : styles.statusTextSched,
+                                          ]}
+                                        >
+                                          {bus.isRealtime
+                                            ? `● ${t.liveBadge}`
+                                            : t.scheduledBadge}
+                                        </Text>
+                                      </View>
+
+                                      <Text style={styles.busTimingHeadline}>
+                                        {timeMode === 'now'
+                                          ? bus.waitMinutes <= 0
+                                            ? `${t.now} (${bus.etaFormatted})`
+                                            : `${t.arrivesIn} ${bus.waitMinutes} ${t.minUnit} (${bus.etaFormatted})`
+                                          : `${t.leaveAt}${bus.leaveHomeFormatted} · ${t.boardLine} ${bus.etaFormatted}`}
+                                      </Text>
+                                    </View>
+
+                                    <Text style={styles.busSubTimeline}>
+                                      {isRTL
+                                        ? bus.agencyNameHe
+                                        : bus.agencyNameEn}{' '}
+                                      • {t.arrivePlatformAt}
+                                      <Text style={styles.busSubTimelineBold}>
+                                        {bus.arriveStationFormatted}
+                                      </Text>
                                     </Text>
+                                  </View>
+                                </View>
+
+                                <View style={styles.totalDurationBox}>
+                                  <Text style={styles.totalDurationNum}>
+                                    {bus.totalMinutes}
+                                  </Text>
+                                  <Text style={styles.totalDurationUnit}>
+                                    {t.minUnit}
                                   </Text>
                                 </View>
                               </View>
 
-                              <View style={styles.totalDurationBox}>
-                                <Text style={styles.totalDurationNum}>
-                                  {bus.totalMinutes}
+                              {/* "Run or Chill?" Urgency Strip + Backup Bus Indicator */}
+                              {timeMode === 'now' && (
+                                <View
+                                  style={[
+                                    styles.urgencyRow,
+                                    { flexDirection: rowDir },
+                                  ]}
+                                >
+                                  <View
+                                    style={[
+                                      styles.urgencyPill,
+                                      {
+                                        backgroundColor: urgencyInfo.bg,
+                                        borderColor: urgencyInfo.border,
+                                      },
+                                    ]}
+                                  >
+                                    <Text
+                                      style={[
+                                        styles.urgencyPillText,
+                                        { color: urgencyInfo.text },
+                                      ]}
+                                    >
+                                      {urgencyInfo.label}
+                                    </Text>
+                                  </View>
+
+                                  {bus.nextBackupBusMinutesLater !== null &&
+                                    bus.nextBackupBusLine && (
+                                      <Text style={styles.backupBusText}>
+                                        {t.backupBusHint
+                                          .replace(
+                                            '{line}',
+                                            bus.nextBackupBusLine
+                                          )
+                                          .replace(
+                                            '{m}',
+                                            String(
+                                              bus.nextBackupBusMinutesLater
+                                            )
+                                          )}
+                                      </Text>
+                                    )}
+                                </View>
+                              )}
+
+                              {/* Compact 3-Step Visual Breadcrumb + Entrance Hint */}
+                              <View
+                                style={[
+                                  styles.breadcrumbBar,
+                                  { flexDirection: rowDir },
+                                ]}
+                              >
+                                <Text
+                                  style={[styles.breadcrumbStep, { textAlign }]}
+                                  numberOfLines={1}
+                                >
+                                  🚶 {bus.walkToBusMeters}
+                                  {t.metersUnit} (
+                                  {isRTL
+                                    ? bus.originStopNameHe
+                                    : bus.originStopNameEn}
+                                  )
                                 </Text>
-                                <Text style={styles.totalDurationUnit}>
-                                  {t.minUnit}
+                                <Text style={styles.breadcrumbArrow}>
+                                  {isRTL ? '←' : '→'}
+                                </Text>
+                                <Text
+                                  style={[styles.breadcrumbStep, { textAlign }]}
+                                  numberOfLines={1}
+                                >
+                                  🚌 {bus.rideMinutes} {t.minUnit} (
+                                  {isRTL
+                                    ? bus.alightStopNameHe
+                                    : bus.alightStopNameEn}
+                                  )
+                                </Text>
+                                <Text style={styles.breadcrumbArrow}>
+                                  {isRTL ? '←' : '→'}
+                                </Text>
+                                <Text style={styles.breadcrumbStepEnd}>
+                                  🚇 {bus.walkFromBusMeters}
+                                  {t.metersUnit}
+                                  {entranceHint ? ` · ${entranceHint}` : ''}
                                 </Text>
                               </View>
                             </View>
-
-                            {/* Compact 3-Step Visual Breadcrumb */}
-                            <View
-                              style={[
-                                styles.breadcrumbBar,
-                                { flexDirection: rowDir },
-                              ]}
-                            >
-                              <Text
-                                style={[styles.breadcrumbStep, { textAlign }]}
-                                numberOfLines={1}
-                              >
-                                🚶 {bus.walkToBusMeters}
-                                {t.metersUnit} (
-                                {isRTL
-                                  ? bus.originStopNameHe
-                                  : bus.originStopNameEn}
-                                )
-                              </Text>
-                              <Text style={styles.breadcrumbArrow}>
-                                {isRTL ? '←' : '→'}
-                              </Text>
-                              <Text
-                                style={[styles.breadcrumbStep, { textAlign }]}
-                                numberOfLines={1}
-                              >
-                                🚌 {bus.rideMinutes} {t.minUnit} (
-                                {isRTL
-                                  ? bus.alightStopNameHe
-                                  : bus.alightStopNameEn}
-                                )
-                              </Text>
-                              <Text style={styles.breadcrumbArrow}>
-                                {isRTL ? '←' : '→'}
-                              </Text>
-                              <Text style={styles.breadcrumbStepEnd}>
-                                🚇 {bus.walkFromBusMeters}
-                                {t.metersUnit}
-                              </Text>
-                            </View>
-                          </View>
-                        )
+                          );
+                        }
                       )}
                     </View>
                   )}
@@ -1183,7 +1349,8 @@ const styles = StyleSheet.create({
     top: 0,
     left: 12,
     right: 12,
-    paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 24) + 6 : 4,
+    paddingTop:
+      Platform.OS === 'android' ? (StatusBar.currentHeight || 24) + 6 : 4,
   },
   topBlurCard: {
     borderRadius: 18,
@@ -1244,8 +1411,33 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '800',
   },
+  directionScrollRow: {
+    gap: 6,
+    paddingVertical: 1,
+  },
+  directionChip: {
+    backgroundColor: 'rgba(30, 41, 59, 0.8)',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  directionChipActive: {
+    backgroundColor: 'rgba(220, 38, 38, 0.88)',
+    borderColor: '#F87171',
+  },
+  directionChipText: {
+    color: '#CBD5E1',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  directionChipTextActive: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+  },
   segmentedWrapper: {
-    marginTop: 2,
+    marginTop: 1,
   },
   timePickerRow: {
     alignItems: 'center',
@@ -1284,7 +1476,7 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    height: SCREEN_HEIGHT * 0.56,
+    height: SCREEN_HEIGHT * 0.55,
   },
   bottomSheetBlur: {
     flex: 1,
@@ -1437,17 +1629,6 @@ const styles = StyleSheet.create({
     color: '#34D399',
     fontSize: 10,
     fontWeight: '800',
-  },
-  savesPill: {
-    backgroundColor: 'rgba(59, 130, 246, 0.2)',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 6,
-  },
-  savesPillText: {
-    color: '#93C5FD',
-    fontSize: 10,
-    fontWeight: '700',
   },
   stationSubMeta: {
     color: '#9CA3AF',
@@ -1612,6 +1793,27 @@ const styles = StyleSheet.create({
   totalDurationUnit: {
     color: '#94A3B8',
     fontSize: 9,
+    fontWeight: '600',
+  },
+  urgencyRow: {
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 6,
+    flexWrap: 'wrap',
+  },
+  urgencyPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 2.5,
+    borderRadius: 6,
+    borderWidth: 1,
+  },
+  urgencyPillText: {
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  backupBusText: {
+    color: '#94A3B8',
+    fontSize: 10,
     fontWeight: '600',
   },
   breadcrumbBar: {

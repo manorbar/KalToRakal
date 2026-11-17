@@ -43,8 +43,17 @@ export interface Translations {
   liveBadge: string;
   scheduledBadge: string;
   openInMaps: string;
+  walkToBusNav: string;
   done: string;
   changeOrigin: string;
+  dirAny: string;
+  dirTlvBatYam: string;
+  dirPetahTikva: string;
+  dirKiryatArye: string;
+  urgencyChill: string;
+  urgencyLeaveNow: string;
+  urgencyBrisk: string;
+  backupBusHint: string;
 }
 
 export const STRINGS: Record<Language, Translations> = {
@@ -89,10 +98,19 @@ export const STRINGS: Record<Language, Translations> = {
     modeArriveBy: 'שעת הגעה',
     targetTimeLabel: 'זמן מבוקש:',
     liveBadge: 'זמן אמת',
-    scheduledBadge: 'לו"ז מתוכנן',
+    scheduledBadge: 'לו"ז',
     openInMaps: 'נווט לתחנה',
+    walkToBusNav: 'נווט לתחנת האוטובוס',
     done: 'סיום',
     changeOrigin: 'החלף מוצא',
+    dirAny: 'כל הכיוונים',
+    dirTlvBatYam: 'לת"א / בת-ים',
+    dirPetahTikva: 'לפ"ת (R1)',
+    dirKiryatArye: 'לקריית אריה (R2/R3)',
+    urgencyChill: 'צא בעוד {m} דק\' (בנחת)',
+    urgencyLeaveNow: 'צא עכשיו לתחנה',
+    urgencyBrisk: 'הליכה מהירה! (צא מיד)',
+    backupBusHint: 'גיבוי: קו {line} עוד +{m} דק\'',
   },
   en: {
     appTitle: 'KalToRakal',
@@ -135,10 +153,19 @@ export const STRINGS: Record<Language, Translations> = {
     modeArriveBy: 'Arrive By',
     targetTimeLabel: 'Target time:',
     liveBadge: 'LIVE',
-    scheduledBadge: 'SCHEDULED',
-    openInMaps: 'Directions',
+    scheduledBadge: 'SCHED',
+    openInMaps: 'To Station',
+    walkToBusNav: 'Walk to Bus Stop',
     done: 'Done',
     changeOrigin: 'Change Origin',
+    dirAny: 'All Directions',
+    dirTlvBatYam: 'To TLV / Bat Yam',
+    dirPetahTikva: 'To Petah Tikva (R1)',
+    dirKiryatArye: 'To Kiryat Arye (R2/R3)',
+    urgencyChill: 'Leave in {m}m (Chill)',
+    urgencyLeaveNow: 'Leave Now',
+    urgencyBrisk: 'Walk Fast! (Tight)',
+    backupBusHint: 'Backup: Line {line} in +{m}m',
   },
 };
 
