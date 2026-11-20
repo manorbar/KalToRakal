@@ -36,7 +36,9 @@ export interface FeederRoute {
   n: string; // route_short_name (e.g. "63", "238")
   a: string; // agency_id (e.g. "5" for Dan)
   seq: [string, number][]; // [stop_id, relative_minutes][]
-  deps?: number[]; // scheduled weekday departures from stop #1 in minutes from midnight
+  deps?: number[]; // scheduled Sun-Thu weekday departures from stop #1 in minutes from midnight
+  fri?: number[]; // scheduled Friday departures
+  sat?: number[]; // scheduled Saturday / Motzash departures
 }
 
 export interface DankalDataset {
@@ -91,6 +93,7 @@ export interface LiveBusOption {
   entranceHintEn: string | null;
   walkFromBusMeters: number;
   walkFromBusMinutes: number;
+  undergroundBufferMinutes: number; // +2.5 min (rounded to 3) for underground escalators/security
   totalMinutes: number;
   isRealtime: boolean;
 }
@@ -100,6 +103,7 @@ export interface StationRecommendation {
   aerialMeters: number;
   walkMeters: number;
   walkMinutes: number;
+  undergroundBufferMinutes: number;
   walkLeaveFormatted: string;
   walkArriveFormatted: string;
   scooterMinutes: number;
@@ -108,6 +112,14 @@ export interface StationRecommendation {
   minutesSavedByBus: number;
   liveBusOptions: LiveBusOption[];
   nextTrainHeadwayMin: string;
+}
+
+export interface SavedPlace {
+  slot: 'home' | 'work';
+  name_he: string;
+  name_en: string;
+  lat: number;
+  lon: number;
 }
 
 export interface SelectedJourney {

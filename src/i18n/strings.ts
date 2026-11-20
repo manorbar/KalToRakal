@@ -90,6 +90,18 @@ export interface Translations {
   customMapPinHe: string;
   customMapPinEn: string;
   locatingGps: string;
+  outOfServiceTitle: string;
+  outOfServiceBody: string;
+  shabbatNoticeTitle: string;
+  shabbatNoticeBody: string;
+  undergroundBufferHint: string;
+  savedPlacesSection: string;
+  homeLabel: string;
+  workLabel: string;
+  saveCurrentAsHome: string;
+  saveCurrentAsWork: string;
+  updatedSecondsAgo: string;
+  updatedJustNow: string;
 }
 
 export const STRINGS: Record<Language, Translations> = {
@@ -183,6 +195,18 @@ export const STRINGS: Record<Language, Translations> = {
     customMapPinHe: 'נקודה שנבחרה במפה',
     customMapPinEn: 'Dropped Pin on Map',
     locatingGps: 'מאתר מיקום נוכחי...',
+    outOfServiceTitle: 'מחוץ לאזור השירות של דנקל',
+    outOfServiceBody: 'המיקום שנבחר רחוק מקו הדנקל בגוש דן. ניתן לחפש כתובת בת"א/גוש דן או לבחור נקודה במפה.',
+    shabbatNoticeTitle: 'שבת — אין פעילות רכבת קלה ואוטובוסים',
+    shabbatNoticeBody: 'דנקל והתחבורה הציבורית בגוש דן מושבתים מיום שישי אחה"צ ועד מוצאי שבת.',
+    undergroundBufferHint: 'כולל +2.5 דק\' ירידה לרציף תת-קרקעי',
+    savedPlacesSection: 'המקומות השמורים שלי:',
+    homeLabel: 'בית',
+    workLabel: 'עבודה',
+    saveCurrentAsHome: 'שמור מוצא נוכחי כבית',
+    saveCurrentAsWork: 'שמור מוצא נוכחי כעבודה',
+    updatedSecondsAgo: 'עודכן לפני {s} שנ\'',
+    updatedJustNow: 'עודכן עכשיו',
   },
   en: {
     appTitle: 'KalToRakal',
@@ -274,6 +298,18 @@ export const STRINGS: Record<Language, Translations> = {
     customMapPinHe: 'נקודה שנבחרה במפה',
     customMapPinEn: 'Dropped Pin on Map',
     locatingGps: 'Locating current GPS...',
+    outOfServiceTitle: 'Outside Dankal Service Area',
+    outOfServiceBody: 'This location is far from the Gush Dan Red Line. Search an address in Central Israel or drop a pin on the map.',
+    shabbatNoticeTitle: 'Shabbat — No Regular Transit Service',
+    shabbatNoticeBody: 'Dankal Light Rail and Gush Dan buses do not operate from Friday afternoon until Saturday night.',
+    undergroundBufferHint: 'Includes +2.5 min underground platform access',
+    savedPlacesSection: 'My Saved Places:',
+    homeLabel: 'Home',
+    workLabel: 'Work',
+    saveCurrentAsHome: 'Save current as Home',
+    saveCurrentAsWork: 'Save current as Work',
+    updatedSecondsAgo: 'Updated {s}s ago',
+    updatedJustNow: 'Updated just now',
   },
 };
 

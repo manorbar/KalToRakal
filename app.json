@@ -5,18 +5,32 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0A0E17"
+    },
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "il.co.kaltorakal.app",
+      "buildNumber": "1",
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "KalToRakal uses your location to find the nearest Dankal stations and live feeder buses."
+        "NSLocationWhenInUseUsageDescription": "קל לרק\"ל משתמש במיקומך כדי למצוא את תחנות הדנקל הקרובות ביותר, קווי אוטובוס בזמן אמת ולהתריע לפני תחנת הירידה. KalToRakal uses your location to find the fastest live routes to the nearest Dankal stations and send get-off alerts."
       }
     },
     "android": {
       "package": "il.co.kaltorakal.app",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#0A0E17"
+      },
       "permissions": [
         "ACCESS_COARSE_LOCATION",
-        "ACCESS_FINE_LOCATION"
+        "ACCESS_FINE_LOCATION",
+        "POST_NOTIFICATIONS",
+        "VIBRATE"
       ]
     },
     "web": {

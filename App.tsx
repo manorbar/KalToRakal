@@ -17,7 +17,9 @@ import {
   PanResponder,
   Vibration,
   ViewProps,
+  RefreshControl,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import DateTimePicker, {
   DateTimePickerEvent,
@@ -38,6 +40,7 @@ import {
   TimeMode,
   UrgencyLevel,
   SelectedJourney,
+  SavedPlace,
 } from './src/types/transit';
 import { STRINGS, PRESET_ORIGINS, PresetOrigin } from './src/i18n/strings';
 import {
@@ -45,6 +48,9 @@ import {
   getAllStations,
   getRedLinePolylines,
   haversineMeters,
+  isShabbatServiceWindow,
+  isWithinGushDanServiceArea,
+  syncLatestGtfsDataset,
 } from './src/services/routingEngine';
 import {
   OriginSearchResult,
@@ -286,11 +292,29 @@ export default function App() {
     StationRecommendation[]
   >([]);
   const [loading, setLoading] = useState<boolean>(true);
-  const [lastUpdated, setLastUpdated] = useState<string>('');
+  const [refreshing, setRefreshing] = useState<boolean>(false);
+  const [lastUpdatedMs, setLastUpdatedMs] = useState<number>(0);
+  const [secondsSinceUpdate, setSecondsSinceUpdate] = useState<number>(0);
   const [gpsError, setGpsError] = useState<string | null>(null);
+  const [savedPlaces, setSavedPlaces] = useState<{
+    home?: SavedPlace;
+    work?: SavedPlace;
+  }>({});
+
+  const SAVED_PLACES_KEY = 'kaltorakal_saved_places_v1';
 
   const t = STRINGS[lang];
   const isRTL = lang === 'he';
+
+  const isOutOfServiceArea = useMemo(
+    () => !isWithinGushDanServiceArea(activeOrigin.lat, activeOrigin.lon),
+    [activeOrigin.lat, activeOrigin.lon]
+  );
+
+  const isShabbatNow = useMemo(
+    () => isShabbatServiceWindow(timeMode === 'now' ? new Date() : targetDate),
+    [timeMode, targetDate]
+  );
 
   const allStations = useMemo(() => getAllStations(), []);
   const { r1Coords, r2BranchCoords } = useMemo(() => getRedLinePolylines(), []);
@@ -567,9 +591,10 @@ export default function App() {
       countK: number,
       mode: TimeMode,
       dateVal: Date,
-      dirVal: DankalDirection
+      dirVal: DankalDirection,
+      silent = false
     ) => {
-      setLoading(true);
+      if (!silent) setLoading(true);
       try {
         const res = await computeRoutesToNearestDankalStations(
           lat,
@@ -580,7 +605,7 @@ export default function App() {
           dirVal
         );
         setRecommendations(res);
-        if (res.length > 0) {
+        if (res.length > 0 && !silent) {
           const fastest = [...res].sort((a, b) => {
             if (a.bestTotalMinutes !== b.bestTotalMinutes) {
               return a.bestTotalMinutes - b.bestTotalMinutes;
@@ -598,21 +623,118 @@ export default function App() {
           setSelectedStationId(fastest.station.id);
           fitMapToStations(lat, lon, res);
         }
-        const now = new Date();
-        setLastUpdated(
-          now.toLocaleTimeString([], {
-            hour: '2-digit',
-            minute: '2-digit',
-          })
-        );
+        setLastUpdatedMs(Date.now());
+        setSecondsSinceUpdate(0);
       } catch (err) {
         console.error('Error computing routes:', err);
       } finally {
-        setLoading(false);
+        if (!silent) setLoading(false);
+        setRefreshing(false);
       }
     },
     [fitMapToStations]
   );
+
+  // On app launch: load Saved Places (Home/Work), sync latest GTFS in background, and attempt auto-GPS lock
+  const bootInitDoneRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (bootInitDoneRef.current) return;
+    bootInitDoneRef.current = true;
+
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(SAVED_PLACES_KEY);
+        if (raw) {
+          setSavedPlaces(JSON.parse(raw));
+        }
+      } catch {
+        // ignore
+      }
+      // Silently check GitHub Raw for fresher nightly GTFS timetables
+      syncLatestGtfsDataset().then((updated) => {
+        if (updated) {
+          fetchRoutes(
+            activeOrigin.lat,
+            activeOrigin.lon,
+            k,
+            timeMode,
+            targetDate,
+            direction,
+            true
+          );
+        }
+      });
+    })();
+  }, []);
+
+  // Auto-refresh live SIRI ETAs every 30 seconds while in 'now' mode
+  useEffect(() => {
+    if (timeMode !== 'now' || isOutOfServiceArea) return;
+    const interval = setInterval(() => {
+      fetchRoutes(
+        activeOrigin.lat,
+        activeOrigin.lon,
+        k,
+        'now',
+        new Date(),
+        direction,
+        true
+      );
+    }, 30000);
+    return () => clearInterval(interval);
+  }, [
+    timeMode,
+    isOutOfServiceArea,
+    activeOrigin.lat,
+    activeOrigin.lon,
+    k,
+    direction,
+    fetchRoutes,
+  ]);
+
+  // Tick "Updated Xs ago" counter every 5 seconds
+  useEffect(() => {
+    if (!lastUpdatedMs) return;
+    const timer = setInterval(() => {
+      setSecondsSinceUpdate(
+        Math.max(0, Math.floor((Date.now() - lastUpdatedMs) / 1000))
+      );
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [lastUpdatedMs]);
+
+  const handleSaveCurrentPlace = async (slot: 'home' | 'work') => {
+    triggerHaptic('success');
+    const place: SavedPlace = {
+      slot,
+      name_he: activeOrigin.name_he.replace(' (GPS)', ''),
+      name_en: activeOrigin.name_en.replace(' (GPS)', ''),
+      lat: activeOrigin.lat,
+      lon: activeOrigin.lon,
+    };
+    const next = { ...savedPlaces, [slot]: place };
+    setSavedPlaces(next);
+    try {
+      await AsyncStorage.setItem(SAVED_PLACES_KEY, JSON.stringify(next));
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleSelectSavedPlace = (place: SavedPlace) => {
+    triggerHaptic('selection');
+    setGpsError(null);
+    setActiveOrigin({
+      id: `saved_${place.slot}`,
+      name_he: place.name_he,
+      name_en: place.name_en,
+      lat: place.lat,
+      lon: place.lon,
+      isGps: false,
+    });
+    setShowOriginSheet(false);
+    setOriginSearchQuery('');
+  };
 
   useEffect(() => {
     stopAllTracking();
@@ -711,6 +833,14 @@ export default function App() {
       setLocatingGps(false);
     }
   }, [lang]);
+
+  // Auto-start on user's live GPS once on initial app launch (silent fallback if denied)
+  const autoGpsTriedRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (autoGpsTriedRef.current) return;
+    autoGpsTriedRef.current = true;
+    handleUseMyGps(true);
+  }, [handleUseMyGps]);
 
   // Instant offline bus stop search while typing in the Origin modal
   const localStopResults = useMemo(
@@ -2139,7 +2269,48 @@ export default function App() {
                 style={styles.cardsScroll}
                 contentContainerStyle={styles.cardsScrollContent}
                 showsVerticalScrollIndicator={false}
+                refreshControl={
+                  <RefreshControl
+                    refreshing={refreshing}
+                    tintColor="#64D2FF"
+                    onRefresh={() => {
+                      triggerHaptic('light');
+                      setRefreshing(true);
+                      fetchRoutes(
+                        activeOrigin.lat,
+                        activeOrigin.lon,
+                        k,
+                        timeMode,
+                        targetDate,
+                        direction
+                      );
+                    }}
+                  />
+                }
               >
+                {/* Out-of-Service Area Banner (e.g., user is outside Gush Dan) */}
+                {isOutOfServiceArea && (
+                  <View style={styles.noticeBannerWarn}>
+                    <Text style={[styles.noticeBannerTitle, { textAlign }]}>
+                      📍 {t.outOfServiceTitle}
+                    </Text>
+                    <Text style={[styles.noticeBannerBody, { textAlign }]}>
+                      {t.outOfServiceBody}
+                    </Text>
+                  </View>
+                )}
+
+                {/* Shabbat Notice Banner (Friday afternoon -> Saturday night) */}
+                {isShabbatNow && (
+                  <View style={styles.noticeBannerInfo}>
+                    <Text style={[styles.noticeBannerTitle, { textAlign }]}>
+                      🕯️ {t.shabbatNoticeTitle}
+                    </Text>
+                    <Text style={[styles.noticeBannerBody, { textAlign }]}>
+                      {t.shabbatNoticeBody}
+                    </Text>
+                  </View>
+                )}
                 {sortedRecommendations.map((rec, idx) => {
                   const isFastest = rec.station.id === overallFastestStationId;
                   const isSelected = rec.station.id === selectedStationId;
@@ -2210,7 +2381,7 @@ export default function App() {
                           <Text style={[styles.stationSubMeta, { textAlign }]}>
                             {cityName} •{' '}
                             {rec.station.is_underground
-                              ? t.underground
+                              ? `${t.underground} (+2.5')`
                               : t.surface}{' '}
                             • {rec.aerialMeters}
                             {t.metersUnit} • {t.dankalFreq}
@@ -2492,7 +2663,16 @@ export default function App() {
 
                 <Text style={styles.footerInfo}>
                   {t.dataSourceFooter}
-                  {lastUpdated ? ` • ${lastUpdated}` : ''}
+                  {lastUpdatedMs > 0
+                    ? ` • ${
+                        secondsSinceUpdate < 5
+                          ? t.updatedJustNow
+                          : t.updatedSecondsAgo.replace(
+                              '{s}',
+                              String(secondsSinceUpdate)
+                            )
+                      }`
+                    : ''}
                 </Text>
               </ScrollView>
             </View>
@@ -2697,8 +2877,90 @@ export default function App() {
                   )}
               </View>
             ) : (
-              /* Default Presets + Map Long-Press Hint */
+              /* Default Presets + Saved Places (Home / Work) + Map Long-Press Hint */
               <>
+                {/* Saved Places (Home / Work) 1-Tap Section */}
+                <Text style={[styles.modalSectionHeader, { textAlign }]}>
+                  {t.savedPlacesSection}
+                </Text>
+                <View style={[styles.savedPlacesRow, { flexDirection: rowDir }]}>
+                  <TouchableOpacity
+                    style={[
+                      styles.savedPlaceCard,
+                      savedPlaces.home && styles.savedPlaceCardFilled,
+                      { flexDirection: rowDir },
+                    ]}
+                    onPress={() =>
+                      savedPlaces.home
+                        ? handleSelectSavedPlace(savedPlaces.home)
+                        : handleSaveCurrentPlace('home')
+                    }
+                    onLongPress={() => handleSaveCurrentPlace('home')}
+                  >
+                    <Ionicons
+                      name="home"
+                      size={18}
+                      color={savedPlaces.home ? '#30D158' : '#94A3B8'}
+                    />
+                    <View
+                      style={{
+                        flex: 1,
+                        alignItems: isRTL ? 'flex-end' : 'flex-start',
+                      }}
+                    >
+                      <Text style={styles.savedPlaceTitle}>{t.homeLabel}</Text>
+                      <Text
+                        style={[styles.savedPlaceSub, { textAlign }]}
+                        numberOfLines={1}
+                      >
+                        {savedPlaces.home
+                          ? isRTL
+                            ? savedPlaces.home.name_he
+                            : savedPlaces.home.name_en
+                          : t.saveCurrentAsHome}
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.savedPlaceCard,
+                      savedPlaces.work && styles.savedPlaceCardFilled,
+                      { flexDirection: rowDir },
+                    ]}
+                    onPress={() =>
+                      savedPlaces.work
+                        ? handleSelectSavedPlace(savedPlaces.work)
+                        : handleSaveCurrentPlace('work')
+                    }
+                    onLongPress={() => handleSaveCurrentPlace('work')}
+                  >
+                    <Ionicons
+                      name="briefcase"
+                      size={18}
+                      color={savedPlaces.work ? '#64D2FF' : '#94A3B8'}
+                    />
+                    <View
+                      style={{
+                        flex: 1,
+                        alignItems: isRTL ? 'flex-end' : 'flex-start',
+                      }}
+                    >
+                      <Text style={styles.savedPlaceTitle}>{t.workLabel}</Text>
+                      <Text
+                        style={[styles.savedPlaceSub, { textAlign }]}
+                        numberOfLines={1}
+                      >
+                        {savedPlaces.work
+                          ? isRTL
+                            ? savedPlaces.work.name_he
+                            : savedPlaces.work.name_en
+                          : t.saveCurrentAsWork}
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                </View>
+
                 <View style={[styles.mapHintPill, { flexDirection: rowDir }]}>
                   <Ionicons
                     name="hand-left-outline"
@@ -3781,6 +4043,58 @@ const styles = StyleSheet.create({
     color: '#BAE6FD',
     fontSize: 12,
     fontWeight: '600',
+  },
+  savedPlacesRow: {
+    gap: 10,
+  },
+  savedPlaceCard: {
+    flex: 1,
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    borderRadius: 14,
+    padding: 11,
+    alignItems: 'center',
+    gap: 9,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+  },
+  savedPlaceCardFilled: {
+    borderColor: 'rgba(100, 210, 255, 0.35)',
+    backgroundColor: 'rgba(10, 132, 255, 0.12)',
+  },
+  savedPlaceTitle: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  savedPlaceSub: {
+    color: 'rgba(255, 255, 255, 0.58)',
+    fontSize: 11,
+    marginTop: 1,
+  },
+  noticeBannerWarn: {
+    backgroundColor: 'rgba(245, 158, 11, 0.16)',
+    borderRadius: 14,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(251, 191, 36, 0.45)',
+    gap: 4,
+  },
+  noticeBannerInfo: {
+    backgroundColor: 'rgba(99, 102, 241, 0.18)',
+    borderRadius: 14,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(129, 140, 248, 0.45)',
+    gap: 4,
+  },
+  noticeBannerTitle: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  noticeBannerBody: {
+    color: 'rgba(255, 255, 255, 0.78)',
+    fontSize: 12,
   },
   modalContent: {
     padding: 16,

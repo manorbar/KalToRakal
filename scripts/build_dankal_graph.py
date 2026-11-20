@@ -5,12 +5,12 @@ from the Israeli Ministry of Transport (MoT) official GTFS feed using HTTP Range
 
 Extracts:
 1. All 34 Dankal Red Line stations (R1, R2, R3) ordered along the corridor for map polyline rendering,
-   with Hebrew & English names, coordinates, city, platform stop codes, and lines served.
+   with Hebrew & English names, coordinates, city, platform stop codes, underground flag, and lines served.
 2. Direct Feeder Bus Graph: Every bus route & stop in Gush Dan that travels directly to within 260m
    of a Dankal station, including:
    - Stop sequences & relative travel time offsets (`seq`)
-   - Weekday scheduled departure times from the route's first stop (`deps`, in minutes from midnight)
-     so the app can compute exact "Depart At" and "Arrive By" plans for any time of day!
+   - Separate daily departure timetables (`deps` = Sun-Thu weekday, `fri` = Friday, `sat` = Saturday/Motzash)
+     so the app handles weekday, Friday, Shabbat, and Motzash accurately!
 """
 import urllib.request
 import ssl
@@ -22,6 +22,7 @@ import json
 import math
 import os
 import re
+from datetime import datetime
 from collections import defaultdict
 
 URL = "https://gtfs.mot.gov.il/gtfsfiles/israel-public-transportation.zip"
@@ -156,11 +157,18 @@ def main():
         if row.get("lang") == "en" and row.get("trans_id"):
             en_trans[row["trans_id"]] = row.get("translation", "")
 
-    # Identify active weekday (Tuesday/Wednesday) service_ids so we collect a clean 1-day departure schedule per route
+    # Separate active services into Weekday (Sun-Thu), Friday, and Saturday (Motzash)
     weekday_services = set()
+    friday_services = set()
+    saturday_services = set()
     for row in csv.DictReader(io.StringIO(cal_txt)):
+        sid = row["service_id"]
         if row.get("tuesday") == "1" or row.get("wednesday") == "1":
-            weekday_services.add(row["service_id"])
+            weekday_services.add(sid)
+        if row.get("friday") == "1":
+            friday_services.add(sid)
+        if row.get("saturday") == "1":
+            saturday_services.add(sid)
 
     dankal_route_ids = {
         "34445": "R2",
@@ -206,7 +214,10 @@ def main():
         name_he = p["name_he"]
         if name_he not in stations_map:
             city_he = p["city_he"]
-            underground_names = {"קרית אריה", "בן גוריון", "ביאליק", "אבא הלל", "ארלוזורוב", "שאול המלך", "יהודית", "קרליבך", "אלנבי", "אליפלט"}
+            underground_names = {
+                "קרית אריה", "בן גוריון", "ביאליק", "אבא הלל", "ארלוזורוב",
+                "שאול המלך", "יהודית", "קרליבך", "אלנבי", "אליפלט"
+            }
             stations_map[name_he] = {
                 "id": f"st_{p['stop_code']}",
                 "name_he": name_he,
@@ -225,10 +236,12 @@ def main():
         if p["stop_id"] not in stations_map[name_he]["stop_ids"]:
             stations_map[name_he]["stop_ids"].append(p["stop_id"])
 
-    # Pick one representative trip per route_id AND map all weekday trips to their route_id
     rep_trip_to_route = {}
     seen_routes = set()
     weekday_trip_to_route = {}
+    friday_trip_to_route = {}
+    saturday_trip_to_route = {}
+
     for row in csv.DictReader(io.StringIO(trips_txt)):
         rid = row["route_id"]
         tid = row["trip_id"]
@@ -240,6 +253,10 @@ def main():
             rep_trip_to_route[tid] = rid
         if sid in weekday_services:
             weekday_trip_to_route[tid] = rid
+        if sid in friday_services:
+            friday_trip_to_route[tid] = rid
+        if sid in saturday_services:
+            saturday_trip_to_route[tid] = rid
 
     station_list = list(stations_map.values())
     stop_to_nearby_stations = defaultdict(list)
@@ -251,18 +268,30 @@ def main():
             if d <= 260:
                 stop_to_nearby_stations[sid].append((st["id"], round(d)))
 
-    print("3. Downloading stop_times.txt to build Feeder Graph + Daily Timetables...")
+    print("3. Downloading stop_times.txt to build Feeder Graph + Weekday/Friday/Saturday Timetables...")
     st_txt = download_file_from_zip(files, "stop_times.txt").decode("utf-8-sig")
 
     trip_stops = defaultdict(list)
-    route_departures = defaultdict(set) # route_id -> set of integer minutes from midnight (at stop_sequence=1)
+    route_deps_weekday = defaultdict(set)
+    route_deps_friday = defaultdict(set)
+    route_deps_saturday = defaultdict(set)
 
     for row in csv.DictReader(io.StringIO(st_txt)):
         tid = row["trip_id"]
         seq = int(row["stop_sequence"])
-        if seq == 1 and tid in weekday_trip_to_route:
-            rid = weekday_trip_to_route[tid]
-            route_departures[rid].add(round(to_minutes(row["departure_time"])))
+        if seq == 1:
+            dep_min = None
+            if tid in weekday_trip_to_route:
+                dep_min = round(to_minutes(row["departure_time"]))
+                route_deps_weekday[weekday_trip_to_route[tid]].add(dep_min)
+            if tid in friday_trip_to_route:
+                if dep_min is None:
+                    dep_min = round(to_minutes(row["departure_time"]))
+                route_deps_friday[friday_trip_to_route[tid]].add(dep_min)
+            if tid in saturday_trip_to_route:
+                if dep_min is None:
+                    dep_min = round(to_minutes(row["departure_time"]))
+                route_deps_saturday[saturday_trip_to_route[tid]].add(dep_min)
         if tid in rep_trip_to_route:
             sid = row["stop_id"]
             if sid in stops_by_id:
@@ -313,17 +342,22 @@ def main():
             rel_min = round(to_minutes(arr_str) - t0, 1)
             compact_stops.append([sid, rel_min])
             used_stop_ids.add(sid)
-        deps_sorted = sorted(list(route_departures.get(rid, [])))
-        feeder_routes[rid] = {
+        entry = {
             "n": rinfo["short_name"],
             "a": rinfo["agency_id"],
             "seq": compact_stops,
-            "deps": deps_sorted,
+            "deps": sorted(list(route_deps_weekday.get(rid, []))),
         }
+        fri_deps = sorted(list(route_deps_friday.get(rid, [])))
+        sat_deps = sorted(list(route_deps_saturday.get(rid, [])))
+        if fri_deps:
+            entry["fri"] = fri_deps
+        if sat_deps:
+            entry["sat"] = sat_deps
+        feeder_routes[rid] = entry
 
     formatted_stations = []
     station_by_id = {st["id"]: st for st in station_list}
-    # Order stations along R1 (Petah Tikva -> Bat Yam) + Kiryat Arye branch
     ordered_all = []
     seen_st = set()
     for st_id in r1_ordered_station_ids + r2_branch_station_ids:
@@ -363,7 +397,7 @@ def main():
         compact_stops_dict[sid] = entry
 
     output_data = {
-        "generated_at": "2026-11-17",
+        "generated_at": datetime.utcnow().strftime("%Y-%m-%d"),
         "r1_polyline_ids": r1_ordered_station_ids,
         "r2_branch_ids": r2_branch_station_ids,
         "stations": formatted_stations,
@@ -371,14 +405,14 @@ def main():
         "feeder_routes": feeder_routes,
     }
 
-    out_dir = "/Users/manorbar/Documents/Ideas/KalToRakal/src/data"
+    out_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src", "data")
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, "dankal_data.json")
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(output_data, f, ensure_ascii=False, separators=(",", ":"))
 
     size_kb = os.path.getsize(out_path) / 1024.0
-    print(f"Successfully wrote {out_path} ({size_kb:.1f} KB) with daily departure timetables!")
+    print(f"Successfully wrote {out_path} ({size_kb:.1f} KB) with Weekday + Friday + Saturday timetables!")
 
 if __name__ == "__main__":
     main()

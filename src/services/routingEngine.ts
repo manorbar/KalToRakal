@@ -1,4 +1,5 @@
 import rawData from '../data/dankal_data.json';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   DankalDataset,
   DankalDirection,
@@ -10,7 +11,55 @@ import {
   UrgencyLevel,
 } from '../types/transit';
 
-const dataset = rawData as unknown as DankalDataset;
+const REMOTE_GTFS_JSON_URL =
+  'https://raw.githubusercontent.com/manorbar/KalToRakal/main/src/data/dankal_data.json';
+const CACHED_GTFS_KEY = 'kaltorakal_cached_gtfs_v1';
+
+// Active dataset starts with the bundled offline JSON and silently upgrades if newer remote data is cached/fetched
+let activeDataset: DankalDataset = rawData as unknown as DankalDataset;
+
+/**
+ * Loads any previously cached GTFS dataset from AsyncStorage, then checks GitHub Raw
+ * in the background to silently refresh the Dankal feeder graph when the weekly/nightly Action updates it.
+ */
+export async function syncLatestGtfsDataset(): Promise<boolean> {
+  try {
+    const cachedStr = await AsyncStorage.getItem(CACHED_GTFS_KEY);
+    if (cachedStr) {
+      const parsed = JSON.parse(cachedStr) as DankalDataset;
+      if (
+        parsed?.generated_at &&
+        parsed.generated_at > activeDataset.generated_at &&
+        Array.isArray(parsed.stations)
+      ) {
+        activeDataset = parsed;
+      }
+    }
+  } catch {
+    // ignore storage read error
+  }
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 6000);
+    const resp = await fetch(REMOTE_GTFS_JSON_URL, { signal: controller.signal });
+    clearTimeout(timer);
+    if (!resp.ok) return false;
+    const remoteData = (await resp.json()) as DankalDataset;
+    if (
+      remoteData?.generated_at &&
+      remoteData.generated_at > activeDataset.generated_at &&
+      Array.isArray(remoteData.stations)
+    ) {
+      activeDataset = remoteData;
+      await AsyncStorage.setItem(CACHED_GTFS_KEY, JSON.stringify(remoteData));
+      return true;
+    }
+  } catch {
+    // offline or timeout — bundled dataset continues working seamlessly
+  }
+  return false;
+}
 
 const AGENCY_NAMES: Record<string, { he: string; en: string }> = {
   '3': { he: 'אגד', en: 'Egged' },
@@ -24,6 +73,9 @@ const AGENCY_NAMES: Record<string, { he: string; en: string }> = {
   '34': { he: 'תנופה', en: 'Tnufa' },
   '37': { he: 'אקסטרה', en: 'Extra' },
 };
+
+// Realistic escalator / security gate buffer for the 10 deep underground Red Line stations
+export const UNDERGROUND_PLATFORM_BUFFER_MIN = 2.5;
 
 export function haversineMeters(
   lat1: number,
@@ -42,21 +94,45 @@ export function haversineMeters(
   return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+/**
+ * Checks whether coordinates are within reasonable range (~18km) of the Dankal Gush Dan service area.
+ */
+export function isWithinGushDanServiceArea(lat: number, lon: number): boolean {
+  let minDist = Infinity;
+  for (const st of activeDataset.stations) {
+    const d = haversineMeters(lat, lon, st.lat, st.lon);
+    if (d < minDist) minDist = d;
+  }
+  return minDist <= 18000;
+}
+
+/**
+ * Checks if a given Date falls inside typical Shabbat transit shutdown hours in Israel
+ * (Friday after ~16:00 through Saturday before ~19:00).
+ */
+export function isShabbatServiceWindow(d: Date): boolean {
+  const day = d.getDay(); // 5 = Friday, 6 = Saturday
+  const mins = d.getHours() * 60 + d.getMinutes();
+  if (day === 5 && mins >= 16 * 60) return true;
+  if (day === 6 && mins < 19 * 60) return true;
+  return false;
+}
+
 export function getAllStations(): DankalStation[] {
-  return dataset.stations;
+  return activeDataset.stations;
 }
 
 export function getRedLinePolylines(): {
   r1Coords: { latitude: number; longitude: number }[];
   r2BranchCoords: { latitude: number; longitude: number }[];
 } {
-  const stationById = new Map(dataset.stations.map((s) => [s.id, s]));
-  const r1Coords = (dataset.r1_polyline_ids || [])
+  const stationById = new Map(activeDataset.stations.map((s) => [s.id, s]));
+  const r1Coords = (activeDataset.r1_polyline_ids || [])
     .map((id) => stationById.get(id))
     .filter((s): s is DankalStation => Boolean(s))
     .map((s) => ({ latitude: s.lat, longitude: s.lon }));
 
-  const r2BranchCoords = (dataset.r2_branch_ids || [])
+  const r2BranchCoords = (activeDataset.r2_branch_ids || [])
     .map((id) => stationById.get(id))
     .filter((s): s is DankalStation => Boolean(s))
     .map((s) => ({ latitude: s.lat, longitude: s.lon }));
@@ -134,17 +210,27 @@ function stationMatchesDirection(
   return true;
 }
 
+function getDeparturesForDay(
+  route: { deps?: number[]; fri?: number[]; sat?: number[] },
+  dayOfWeek: number
+): number[] {
+  if (dayOfWeek === 5) return route.fri || [];
+  if (dayOfWeek === 6) return route.sat || [];
+  return route.deps || [];
+}
+
 function findCandidateFeederConnections(
   userLat: number,
   userLon: number,
   targetStationIds: Set<string>,
+  dayOfWeek: number,
   maxWalkToBusMeters = 500
 ): {
   matches: FeederMatch[];
   originStopCodesToQuery: string[];
 } {
   const nearbyOriginStops = new Map<string, number>();
-  for (const [stopId, stop] of Object.entries(dataset.stops)) {
+  for (const [stopId, stop] of Object.entries(activeDataset.stops)) {
     const d = haversineMeters(userLat, userLon, stop.lat, stop.lon);
     if (d <= maxWalkToBusMeters) {
       nearbyOriginStops.set(stopId, Math.round(d));
@@ -154,7 +240,7 @@ function findCandidateFeederConnections(
   const matches: FeederMatch[] = [];
   const originStopsWithValidRoutes = new Map<string, number>();
 
-  for (const [routeId, route] of Object.entries(dataset.feeder_routes)) {
+  for (const [routeId, route] of Object.entries(activeDataset.feeder_routes)) {
     const seq = route.seq;
     let bestOriginIdx = -1;
     let bestOriginDist = Infinity;
@@ -171,7 +257,7 @@ function findCandidateFeederConnections(
     if (bestOriginIdx === -1) continue;
 
     const [originStopId, originTimeMin] = seq[bestOriginIdx];
-    const originStop = dataset.stops[originStopId];
+    const originStop = activeDataset.stops[originStopId];
     if (!originStop) continue;
 
     const bestAlightPerStation = new Map<
@@ -186,7 +272,7 @@ function findCandidateFeederConnections(
 
     for (let j = bestOriginIdx + 1; j < seq.length; j++) {
       const [destStopId, destTimeMin] = seq[j];
-      const destStop = dataset.stops[destStopId];
+      const destStop = activeDataset.stops[destStopId];
       if (!destStop || !destStop.st) continue;
 
       for (const [stId, walkFromBusM] of Object.entries(destStop.st)) {
@@ -212,7 +298,7 @@ function findCandidateFeederConnections(
       const intermediateStops: IntermediateBusStop[] = [];
       for (let kIdx = bestOriginIdx + 1; kIdx <= alight.alightIdx; kIdx++) {
         const [interSid, interTime] = seq[kIdx];
-        const stp = dataset.stops[interSid];
+        const stp = activeDataset.stops[interSid];
         if (!stp) continue;
         intermediateStops.push({
           stopId: interSid,
@@ -241,7 +327,7 @@ function findCandidateFeederConnections(
         walkFromBusMeters: alight.walkFromBusMeters,
         rideMinutes: alight.rideMinutes,
         intermediateStops,
-        deps: route.deps || [],
+        deps: getDeparturesForDay(route, dayOfWeek),
       });
 
       const prevDist = originStopsWithValidRoutes.get(originStop.c);
@@ -308,6 +394,7 @@ export async function computeRoutesToNearestDankalStations(
 ): Promise<StationRecommendation[]> {
   const now = new Date();
   const effectiveDate = timeMode === 'now' ? now : targetDate;
+  const dayOfWeek = effectiveDate.getDay();
   const targetMinOfDay = dateToMinutesFromMidnight(effectiveDate);
   const diffFromNowMinutes = (effectiveDate.getTime() - now.getTime()) / 60000;
 
@@ -317,7 +404,7 @@ export async function computeRoutesToNearestDankalStations(
       diffFromNowMinutes >= -3 &&
       diffFromNowMinutes <= 20);
 
-  const candidateStations = dataset.stations.filter((st) =>
+  const candidateStations = activeDataset.stations.filter((st) =>
     stationMatchesDirection(st, direction)
   );
 
@@ -326,14 +413,24 @@ export async function computeRoutesToNearestDankalStations(
       const aerialMeters = Math.round(
         haversineMeters(userLat, userLon, station.lat, station.lon)
       );
+      const undergroundBuffer = station.is_underground
+        ? UNDERGROUND_PLATFORM_BUFFER_MIN
+        : 0;
       const walkMeters = Math.round(aerialMeters * 1.28);
-      const walkMinutes = Math.max(1, Math.round(walkMeters / 80));
-      const scooterMinutes = Math.max(1, Math.round(walkMeters / 250));
+      const walkMinutes = Math.max(
+        1,
+        Math.round(walkMeters / 80 + undergroundBuffer)
+      );
+      const scooterMinutes = Math.max(
+        1,
+        Math.round(walkMeters / 250 + undergroundBuffer)
+      );
       return {
         station,
         aerialMeters,
         walkMeters,
         walkMinutes,
+        undergroundBufferMinutes: undergroundBuffer,
         scooterMinutes,
       };
     })
@@ -346,6 +443,7 @@ export async function computeRoutesToNearestDankalStations(
     userLat,
     userLon,
     targetStationIds,
+    dayOfWeek,
     500
   );
 
@@ -360,16 +458,22 @@ export async function computeRoutesToNearestDankalStations(
   }
 
   return nearestK.map((item) => {
-    const { station, aerialMeters, walkMeters, walkMinutes, scooterMinutes } =
-      item;
+    const {
+      station,
+      aerialMeters,
+      walkMeters,
+      walkMinutes,
+      undergroundBufferMinutes,
+      scooterMinutes,
+    } = item;
     const stationMatches = matches.filter((m) => m.stationId === station.id);
 
     const liveBusOptions: LiveBusOption[] = [];
     const seenOptionKeys = new Set<string>();
 
     for (const m of stationMatches) {
-      const originStop = dataset.stops[m.originStopId];
-      const alightStop = dataset.stops[m.alightStopId];
+      const originStop = activeDataset.stops[m.originStopId];
+      const alightStop = activeDataset.stops[m.alightStopId];
       if (!originStop || !alightStop) continue;
 
       const walkToBusMinutes = Math.max(
@@ -412,12 +516,18 @@ export async function computeRoutesToNearestDankalStations(
 
           const busArrivalMinOfDay = dateToMinutesFromMidnight(etaDate);
           const leaveHomeMinOfDay = busArrivalMinOfDay - walkToBusMinutes;
-          const arriveStationMinOfDay =
-            busArrivalMinOfDay + m.rideMinutes + walkFromBusMinutes;
-          const totalMinutes =
+          const arriveStationMinOfDay = Math.round(
+            busArrivalMinOfDay +
+              m.rideMinutes +
+              walkFromBusMinutes +
+              undergroundBufferMinutes
+          );
+          const totalMinutes = Math.round(
             Math.max(walkToBusMinutes, waitMinutes) +
-            m.rideMinutes +
-            walkFromBusMinutes;
+              m.rideMinutes +
+              walkFromBusMinutes +
+              undergroundBufferMinutes
+          );
 
           const etaHHMM = v.eta.slice(11, 16);
           const dedupKey = `${m.lineName}_${etaHHMM}`;
@@ -459,18 +569,23 @@ export async function computeRoutesToNearestDankalStations(
             entranceHintEn: entranceHint.en,
             walkFromBusMeters: m.walkFromBusMeters,
             walkFromBusMinutes,
+            undergroundBufferMinutes,
             totalMinutes,
             isRealtime: true,
           });
         }
       }
 
-      // 2. Scheduled GTFS timetable calculation
+      // 2. Scheduled GTFS timetable calculation (day-aware: Sun-Thu / Friday / Saturday)
       if (!useLiveSiri || liveBusOptions.length === 0) {
         for (const depMin of m.deps) {
           const busAtOriginMin = Math.round(depMin + m.originOffsetMinutes);
-          const arriveStationMin =
-            busAtOriginMin + m.rideMinutes + walkFromBusMinutes;
+          const arriveStationMin = Math.round(
+            busAtOriginMin +
+              m.rideMinutes +
+              walkFromBusMinutes +
+              undergroundBufferMinutes
+          );
           const leaveHomeMin = busAtOriginMin - walkToBusMinutes;
 
           if (timeMode === 'arrive_by') {
@@ -491,12 +606,17 @@ export async function computeRoutesToNearestDankalStations(
             timeMode === 'arrive_by' ? 3 : waitMinRaw - walkToBusMinutes;
           const urgency = computeUrgency(spareMinutesToWalk);
 
-          const totalMinutes =
+          const totalMinutes = Math.round(
             timeMode === 'arrive_by'
-              ? walkToBusMinutes + m.rideMinutes + walkFromBusMinutes
+              ? walkToBusMinutes +
+                  m.rideMinutes +
+                  walkFromBusMinutes +
+                  undergroundBufferMinutes
               : Math.max(walkToBusMinutes, waitMinutes) +
-                m.rideMinutes +
-                walkFromBusMinutes;
+                  m.rideMinutes +
+                  walkFromBusMinutes +
+                  undergroundBufferMinutes
+          );
 
           const etaHHMM = formatMinFromMidnight(busAtOriginMin);
           const dedupKey = `${m.lineName}_${etaHHMM}`;
@@ -536,6 +656,7 @@ export async function computeRoutesToNearestDankalStations(
             entranceHintEn: entranceHint.en,
             walkFromBusMeters: m.walkFromBusMeters,
             walkFromBusMinutes,
+            undergroundBufferMinutes,
             totalMinutes,
             isRealtime: false,
           });
@@ -600,6 +721,7 @@ export async function computeRoutesToNearestDankalStations(
       aerialMeters,
       walkMeters,
       walkMinutes,
+      undergroundBufferMinutes,
       walkLeaveFormatted,
       walkArriveFormatted,
       scooterMinutes,
