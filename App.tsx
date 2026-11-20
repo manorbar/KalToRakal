@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   StyleSheet,
   Text,
+  TextInput,
   View,
   ScrollView,
   TouchableOpacity,
@@ -45,6 +46,11 @@ import {
   getRedLinePolylines,
   haversineMeters,
 } from './src/services/routingEngine';
+import {
+  OriginSearchResult,
+  searchAddressesAndPlaces,
+  searchLocalBusStops,
+} from './src/services/originSearch';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -132,6 +138,12 @@ export default function App() {
     'date'
   );
   const [showOriginSheet, setShowOriginSheet] = useState<boolean>(false);
+  const [originSearchQuery, setOriginSearchQuery] = useState<string>('');
+  const [addressSearchResults, setAddressSearchResults] = useState<
+    OriginSearchResult[]
+  >([]);
+  const [searchingAddresses, setSearchingAddresses] = useState<boolean>(false);
+  const [locatingGps, setLocatingGps] = useState<boolean>(false);
   const [selectedStationId, setSelectedStationId] = useState<string | null>(
     null
   );
@@ -613,42 +625,171 @@ export default function App() {
     stopAllTracking,
   ]);
 
-  const handleUseMyGps = async () => {
-    triggerHaptic('light');
+  const handleUseMyGps = useCallback(async (silentOnDeny = false) => {
+    if (!silentOnDeny) {
+      triggerHaptic('light');
+    }
     setGpsError(null);
-    setLoading(true);
+    setLocatingGps(true);
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
-        setGpsError(
-          lang === 'he'
-            ? 'לא ניתנה הרשאת מיקום (GPS)'
-            : 'Location permission denied'
-        );
-        setLoading(false);
+        if (!silentOnDeny) {
+          setGpsError(
+            lang === 'he'
+              ? 'לא ניתנה הרשאת מיקום (GPS)'
+              : 'Location permission denied'
+          );
+        }
+        setLocatingGps(false);
         return;
       }
       const loc = await Location.getCurrentPositionAsync({
         accuracy: Location.Accuracy.Balanced,
       });
-      triggerHaptic('success');
+      const lat = Number(loc.coords.latitude.toFixed(5));
+      const lon = Number(loc.coords.longitude.toFixed(5));
+
+      let labelHe = 'המיקום הנוכחי שלי (GPS)';
+      let labelEn = 'My Current Location (GPS)';
+      try {
+        const rev = await Location.reverseGeocodeAsync({
+          latitude: lat,
+          longitude: lon,
+        });
+        if (rev && rev.length > 0) {
+          const r = rev[0];
+          const street = r.street
+            ? r.streetNumber
+              ? `${r.street} ${r.streetNumber}`
+              : r.street
+            : r.name || '';
+          const city = r.city || r.subregion || '';
+          const formatted = [street, city].filter(Boolean).join(', ');
+          if (formatted) {
+            labelHe = `${formatted} (GPS)`;
+            labelEn = `${formatted} (GPS)`;
+          }
+        }
+      } catch {
+        // Keep default GPS label
+      }
+
+      if (!silentOnDeny) {
+        triggerHaptic('success');
+      }
       setActiveOrigin({
         id: 'gps',
-        name_he: 'המיקום הנוכחי שלי (GPS)',
-        name_en: 'My Current Location (GPS)',
-        lat: Number(loc.coords.latitude.toFixed(5)),
-        lon: Number(loc.coords.longitude.toFixed(5)),
+        name_he: labelHe,
+        name_en: labelEn,
+        lat,
+        lon,
         isGps: true,
       });
       setShowOriginSheet(false);
+      setOriginSearchQuery('');
     } catch {
-      setGpsError(
-        lang === 'he'
-          ? 'לא ניתן לקבל מיקום GPS כעת'
-          : 'Could not fetch GPS location'
-      );
-      setLoading(false);
+      if (!silentOnDeny) {
+        setGpsError(
+          lang === 'he'
+            ? 'לא ניתן לקבל מיקום GPS כעת'
+            : 'Could not fetch GPS location'
+        );
+      }
+    } finally {
+      setLocatingGps(false);
     }
+  }, [lang]);
+
+  // Instant offline bus stop search while typing in the Origin modal
+  const localStopResults = useMemo(
+    () => searchLocalBusStops(originSearchQuery, 6),
+    [originSearchQuery]
+  );
+
+  // Debounced free address / place search via Photon (OpenStreetMap) + OS Geocoder fallback
+  useEffect(() => {
+    const trimmed = originSearchQuery.trim();
+    if (!showOriginSheet || trimmed.length < 2) {
+      setAddressSearchResults([]);
+      setSearchingAddresses(false);
+      return;
+    }
+
+    let cancelled = false;
+    setSearchingAddresses(true);
+    const timer = setTimeout(async () => {
+      const results = await searchAddressesAndPlaces(trimmed, lang, 6);
+      if (!cancelled) {
+        setAddressSearchResults(results);
+        setSearchingAddresses(false);
+      }
+    }, 320);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [originSearchQuery, showOriginSheet, lang]);
+
+  const handleSelectSearchResult = (res: OriginSearchResult) => {
+    triggerHaptic('selection');
+    setGpsError(null);
+    setActiveOrigin({
+      id: res.id,
+      name_he: res.name_he,
+      name_en: res.name_en,
+      lat: res.lat,
+      lon: res.lon,
+      isGps: false,
+    });
+    setShowOriginSheet(false);
+    setOriginSearchQuery('');
+  };
+
+  const handleMapLongPress = async (e: {
+    nativeEvent: { coordinate: { latitude: number; longitude: number } };
+  }) => {
+    const { latitude, longitude } = e.nativeEvent.coordinate;
+    triggerHaptic('light');
+    setGpsError(null);
+
+    const lat = Number(latitude.toFixed(5));
+    const lon = Number(longitude.toFixed(5));
+    let labelHe = t.customMapPinHe;
+    let labelEn = t.customMapPinEn;
+
+    try {
+      const rev = await Location.reverseGeocodeAsync({
+        latitude: lat,
+        longitude: lon,
+      });
+      if (rev && rev.length > 0) {
+        const r = rev[0];
+        const street = r.street
+          ? r.streetNumber
+            ? `${r.street} ${r.streetNumber}`
+            : r.street
+          : r.name || '';
+        const city = r.city || r.subregion || '';
+        const formatted = [street, city].filter(Boolean).join(', ');
+        if (formatted) {
+          labelHe = formatted;
+          labelEn = formatted;
+        }
+      }
+    } catch {
+      // keep default dropped pin label
+    }
+
+    setActiveOrigin({
+      id: `pin_${lat}_${lon}`,
+      name_he: labelHe,
+      name_en: labelEn,
+      lat,
+      lon,
+      isGps: false,
+    });
   };
 
   const handleSelectPreset = (preset: PresetOrigin) => {
@@ -659,6 +800,7 @@ export default function App() {
       isGps: false,
     });
     setShowOriginSheet(false);
+    setOriginSearchQuery('');
   };
 
   const handleTimeModeChange = (index: number) => {
@@ -852,6 +994,7 @@ export default function App() {
         showsUserLocation={true}
         showsCompass={false}
         showsScale={false}
+        onLongPress={handleMapLongPress}
         initialRegion={{
           latitude: activeOrigin.lat - 0.008,
           longitude: activeOrigin.lon,
@@ -1113,14 +1256,18 @@ export default function App() {
 
             <TouchableOpacity
               style={styles.glassCircleIconBtn}
-              onPress={handleUseMyGps}
+              onPress={() => handleUseMyGps(false)}
               activeOpacity={0.75}
             >
-              <Ionicons
-                name="locate"
-                size={18}
-                color={activeOrigin.isGps ? '#64D2FF' : '#F8FAFC'}
-              />
+              {locatingGps ? (
+                <ActivityIndicator size="small" color="#64D2FF" />
+              ) : (
+                <Ionicons
+                  name="locate"
+                  size={18}
+                  color={activeOrigin.isGps ? '#64D2FF' : '#F8FAFC'}
+                />
+              )}
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -2323,7 +2470,7 @@ export default function App() {
         </LiquidGlassCard>
       </Animated.View>
 
-      {/* 4. Native iOS PageSheet Modal for Picking Origin Location */}
+      {/* 4. Native iOS PageSheet Modal for Picking Origin (Current GPS + Free Search + Presets) */}
       <Modal
         visible={showOriginSheet}
         animationType="slide"
@@ -2334,76 +2481,248 @@ export default function App() {
           <View style={[styles.modalHeader, { flexDirection: rowDir }]}>
             <Text style={styles.modalTitle}>{t.changeOrigin}</Text>
             <TouchableOpacity
-              onPress={() => setShowOriginSheet(false)}
+              onPress={() => {
+                setShowOriginSheet(false);
+                setOriginSearchQuery('');
+              }}
               style={styles.modalDoneBtn}
             >
               <Text style={styles.modalDoneText}>{t.done}</Text>
             </TouchableOpacity>
           </View>
 
-          <ScrollView contentContainerStyle={styles.modalContent}>
+          {/* Free Text Search Bar */}
+          <View style={styles.searchBarWrapper}>
+            <View style={[styles.searchInputBox, { flexDirection: rowDir }]}>
+              <Ionicons
+                name="search"
+                size={18}
+                color="rgba(255, 255, 255, 0.55)"
+              />
+              <TextInput
+                style={[styles.searchTextInput, { textAlign }]}
+                value={originSearchQuery}
+                onChangeText={setOriginSearchQuery}
+                placeholder={t.searchOriginPlaceholder}
+                placeholderTextColor="rgba(255, 255, 255, 0.42)"
+                autoCorrect={false}
+                returnKeyType="search"
+                clearButtonMode="never"
+              />
+              {originSearchQuery.length > 0 && (
+                <TouchableOpacity
+                  onPress={() => setOriginSearchQuery('')}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Ionicons
+                    name="close-circle"
+                    size={18}
+                    color="rgba(255, 255, 255, 0.5)"
+                  />
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+
+          <ScrollView
+            contentContainerStyle={styles.modalContent}
+            keyboardShouldPersistTaps="handled"
+          >
+            {/* Current GPS Location Button */}
             <TouchableOpacity
               style={[styles.modalGpsCard, { flexDirection: rowDir }]}
-              onPress={handleUseMyGps}
+              onPress={() => handleUseMyGps(false)}
+              disabled={locatingGps}
             >
-              <Ionicons name="navigate-circle" size={26} color="#0A84FF" />
+              {locatingGps ? (
+                <ActivityIndicator size="small" color="#64D2FF" />
+              ) : (
+                <Ionicons name="navigate-circle" size={26} color="#0A84FF" />
+              )}
               <View
                 style={{
                   flex: 1,
                   alignItems: isRTL ? 'flex-end' : 'flex-start',
                 }}
               >
-                <Text style={styles.modalGpsTitle}>{t.useMyGps}</Text>
+                <Text style={styles.modalGpsTitle}>
+                  {locatingGps ? t.locatingGps : t.useMyGps}
+                </Text>
                 <Text style={styles.modalGpsSub}>
-                  {activeOrigin.lat.toFixed(4)}, {activeOrigin.lon.toFixed(4)}
+                  {activeOrigin.isGps
+                    ? isRTL
+                      ? activeOrigin.name_he
+                      : activeOrigin.name_en
+                    : `${activeOrigin.lat.toFixed(4)}, ${activeOrigin.lon.toFixed(4)}`}
                 </Text>
               </View>
-              {activeOrigin.isGps && (
+              {activeOrigin.isGps && !locatingGps && (
                 <Ionicons name="checkmark-circle" size={22} color="#30D158" />
               )}
             </TouchableOpacity>
 
-            <Text style={[styles.modalSectionHeader, { textAlign }]}>
-              {t.presetLocations}
-            </Text>
+            {originSearchQuery.trim().length >= 2 ? (
+              /* Search Results View */
+              <View style={{ gap: 10 }}>
+                {/* 1. Matching Addresses & Places (Photon / OS Geocoder) */}
+                {(searchingAddresses || addressSearchResults.length > 0) && (
+                  <>
+                    <Text style={[styles.modalSectionHeader, { textAlign }]}>
+                      {t.addressesSection}
+                    </Text>
+                    {searchingAddresses && addressSearchResults.length === 0 ? (
+                      <View
+                        style={[
+                          styles.searchingRow,
+                          { flexDirection: rowDir },
+                        ]}
+                      >
+                        <ActivityIndicator size="small" color="#64D2FF" />
+                        <Text style={styles.searchingText}>
+                          {t.searchingPlaces}
+                        </Text>
+                      </View>
+                    ) : (
+                      addressSearchResults.map((res) => (
+                        <TouchableOpacity
+                          key={res.id}
+                          style={[
+                            styles.modalPresetRow,
+                            { flexDirection: rowDir },
+                          ]}
+                          onPress={() => handleSelectSearchResult(res)}
+                        >
+                          <Ionicons
+                            name="location"
+                            size={20}
+                            color="#64D2FF"
+                          />
+                          <View
+                            style={{
+                              flex: 1,
+                              alignItems: isRTL ? 'flex-end' : 'flex-start',
+                            }}
+                          >
+                            <Text
+                              style={[styles.modalPresetText, { textAlign }]}
+                            >
+                              {isRTL ? res.name_he : res.name_en}
+                            </Text>
+                            <Text
+                              style={[styles.searchResultSub, { textAlign }]}
+                            >
+                              {isRTL ? res.subtitle_he : res.subtitle_en}
+                            </Text>
+                          </View>
+                        </TouchableOpacity>
+                      ))
+                    )}
+                  </>
+                )}
 
-            {PRESET_ORIGINS.map((preset) => {
-              const selected =
-                !activeOrigin.isGps && activeOrigin.id === preset.id;
-              return (
-                <TouchableOpacity
-                  key={preset.id}
-                  style={[
-                    styles.modalPresetRow,
-                    selected && styles.modalPresetRowActive,
-                    { flexDirection: rowDir },
-                  ]}
-                  onPress={() => handleSelectPreset(preset)}
-                >
-                  <Ionicons
-                    name="location-outline"
-                    size={20}
-                    color={selected ? '#64D2FF' : '#94A3B8'}
-                  />
-                  <Text
-                    style={[
-                      styles.modalPresetText,
-                      selected && styles.modalPresetTextActive,
-                      { textAlign },
-                    ]}
-                  >
-                    {isRTL ? preset.name_he : preset.name_en}
-                  </Text>
-                  {selected && (
-                    <Ionicons
-                      name="checkmark-circle"
-                      size={20}
-                      color="#64D2FF"
-                    />
+                {/* 2. Instant Offline Matching Bus Stops (4,225 Gush Dan Stops) */}
+                {localStopResults.length > 0 && (
+                  <>
+                    <Text style={[styles.modalSectionHeader, { textAlign }]}>
+                      {t.busStopsSection}
+                    </Text>
+                    {localStopResults.map((res) => (
+                      <TouchableOpacity
+                        key={res.id}
+                        style={[
+                          styles.modalPresetRow,
+                          { flexDirection: rowDir },
+                        ]}
+                        onPress={() => handleSelectSearchResult(res)}
+                      >
+                        <Ionicons name="bus" size={19} color="#0A84FF" />
+                        <View
+                          style={{
+                            flex: 1,
+                            alignItems: isRTL ? 'flex-end' : 'flex-start',
+                          }}
+                        >
+                          <Text
+                            style={[styles.modalPresetText, { textAlign }]}
+                          >
+                            {isRTL ? res.name_he : res.name_en}
+                          </Text>
+                          <Text
+                            style={[styles.searchResultSub, { textAlign }]}
+                          >
+                            {isRTL ? res.subtitle_he : res.subtitle_en}
+                          </Text>
+                        </View>
+                      </TouchableOpacity>
+                    ))}
+                  </>
+                )}
+
+                {!searchingAddresses &&
+                  addressSearchResults.length === 0 &&
+                  localStopResults.length === 0 && (
+                    <Text style={[styles.noResultsText, { textAlign }]}>
+                      {t.noSearchResults}
+                    </Text>
                   )}
-                </TouchableOpacity>
-              );
-            })}
+              </View>
+            ) : (
+              /* Default Presets + Map Long-Press Hint */
+              <>
+                <View style={[styles.mapHintPill, { flexDirection: rowDir }]}>
+                  <Ionicons
+                    name="hand-left-outline"
+                    size={15}
+                    color="#64D2FF"
+                  />
+                  <Text style={[styles.mapHintText, { textAlign }]}>
+                    {t.mapLongPressHint}
+                  </Text>
+                </View>
+
+                <Text style={[styles.modalSectionHeader, { textAlign }]}>
+                  {t.presetLocations}
+                </Text>
+
+                {PRESET_ORIGINS.map((preset) => {
+                  const selected =
+                    !activeOrigin.isGps && activeOrigin.id === preset.id;
+                  return (
+                    <TouchableOpacity
+                      key={preset.id}
+                      style={[
+                        styles.modalPresetRow,
+                        selected && styles.modalPresetRowActive,
+                        { flexDirection: rowDir },
+                      ]}
+                      onPress={() => handleSelectPreset(preset)}
+                    >
+                      <Ionicons
+                        name="location-outline"
+                        size={20}
+                        color={selected ? '#64D2FF' : '#94A3B8'}
+                      />
+                      <Text
+                        style={[
+                          styles.modalPresetText,
+                          selected && styles.modalPresetTextActive,
+                          { textAlign },
+                        ]}
+                      >
+                        {isRTL ? preset.name_he : preset.name_en}
+                      </Text>
+                      {selected && (
+                        <Ionicons
+                          name="checkmark-circle"
+                          size={20}
+                          color="#64D2FF"
+                        />
+                      )}
+                    </TouchableOpacity>
+                  );
+                })}
+              </>
+            )}
           </ScrollView>
         </View>
       </Modal>
@@ -3373,6 +3692,65 @@ const styles = StyleSheet.create({
     color: '#64D2FF',
     fontSize: 16,
     fontWeight: '700',
+  },
+  searchBarWrapper: {
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 4,
+  },
+  searchInputBox: {
+    backgroundColor: 'rgba(255, 255, 255, 0.09)',
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: Platform.OS === 'ios' ? 11 : 6,
+    alignItems: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.16)',
+  },
+  searchTextInput: {
+    flex: 1,
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '500',
+  },
+  searchingRow: {
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 6,
+  },
+  searchingText: {
+    color: 'rgba(255, 255, 255, 0.65)',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  searchResultSub: {
+    color: 'rgba(255, 255, 255, 0.55)',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  noResultsText: {
+    color: 'rgba(255, 255, 255, 0.55)',
+    fontSize: 13,
+    paddingVertical: 16,
+    paddingHorizontal: 6,
+  },
+  mapHintPill: {
+    backgroundColor: 'rgba(10, 132, 255, 0.14)',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    alignItems: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(100, 210, 255, 0.25)',
+  },
+  mapHintText: {
+    flex: 1,
+    color: '#BAE6FD',
+    fontSize: 12,
+    fontWeight: '600',
   },
   modalContent: {
     padding: 16,

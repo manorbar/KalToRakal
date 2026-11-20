@@ -81,6 +81,15 @@ export interface Translations {
   passedStopStatus: string;
   nextStopStatus: string;
   getOffHereBadge: string;
+  searchOriginPlaceholder: string;
+  searchingPlaces: string;
+  noSearchResults: string;
+  busStopsSection: string;
+  addressesSection: string;
+  mapLongPressHint: string;
+  customMapPinHe: string;
+  customMapPinEn: string;
+  locatingGps: string;
 }
 
 export const STRINGS: Record<Language, Translations> = {
@@ -165,6 +174,15 @@ export const STRINGS: Record<Language, Translations> = {
     passedStopStatus: 'עברנו',
     nextStopStatus: 'התחנה הבאה',
     getOffHereBadge: 'יורדים כאן!',
+    searchOriginPlaceholder: 'חפש כתובת, רחוב, מקום או מק"ט תחנה...',
+    searchingPlaces: 'מחפש כתובות ומקומות...',
+    noSearchResults: 'לא נמצאו תוצאות בגוש דן. נסה שם רחוב או עיר.',
+    busStopsSection: 'תחנות אוטובוס תואמות',
+    addressesSection: 'כתובות ומקומות',
+    mapLongPressHint: 'טיפ: לחיצה ארוכה על המפה ממקמת נקודת מוצא בכל מקום',
+    customMapPinHe: 'נקודה שנבחרה במפה',
+    customMapPinEn: 'Dropped Pin on Map',
+    locatingGps: 'מאתר מיקום נוכחי...',
   },
   en: {
     appTitle: 'KalToRakal',
@@ -247,6 +265,15 @@ export const STRINGS: Record<Language, Translations> = {
     passedStopStatus: 'Passed',
     nextStopStatus: 'Next Stop',
     getOffHereBadge: 'GET OFF HERE',
+    searchOriginPlaceholder: 'Search address, street, place, or stop #...',
+    searchingPlaces: 'Searching addresses & places...',
+    noSearchResults: 'No results in Gush Dan. Try a street name or city.',
+    busStopsSection: 'Matching Bus Stops',
+    addressesSection: 'Addresses & Places',
+    mapLongPressHint: 'Tip: Long-press anywhere on the map to drop a custom start pin',
+    customMapPinHe: 'נקודה שנבחרה במפה',
+    customMapPinEn: 'Dropped Pin on Map',
+    locatingGps: 'Locating current GPS...',
   },
 };
 
