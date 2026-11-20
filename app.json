@@ -16,6 +16,7 @@
       "bundleIdentifier": "il.co.kaltorakal.app",
       "buildNumber": "1",
       "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
         "NSLocationWhenInUseUsageDescription": "קל לרק\"ל משתמש במיקומך כדי למצוא את תחנות הדנקל הקרובות ביותר, קווי אוטובוס בזמן אמת ולהתריע לפני תחנת הירידה. KalToRakal uses your location to find the fastest live routes to the nearest Dankal stations and send get-off alerts."
       }
     },
