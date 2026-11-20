@@ -141,6 +141,32 @@ export default function App() {
   ).current;
   const dragStartHeightRef = useRef<number>(SHEET_DEFAULT_HEIGHT);
 
+  // Measure the floating top overlay so the expanded bottom sheet NEVER overlaps it (even with custom time row open)
+  const [topOverlayBottomY, setTopOverlayBottomY] = useState<number>(210);
+  const maxExpandedHeight = useMemo(
+    () =>
+      Math.max(
+        SHEET_DEFAULT_HEIGHT,
+        Math.min(
+          SHEET_EXPANDED_HEIGHT,
+          Math.floor(SCREEN_HEIGHT - topOverlayBottomY - 12)
+        )
+      ),
+    [topOverlayBottomY]
+  );
+  const maxExpandedHeightRef = useRef<number>(maxExpandedHeight);
+  useEffect(() => {
+    maxExpandedHeightRef.current = maxExpandedHeight;
+    if (sheetSnap === 'expanded') {
+      Animated.spring(sheetHeightAnim, {
+        toValue: maxExpandedHeight,
+        useNativeDriver: false,
+        damping: 22,
+        stiffness: 210,
+      }).start();
+    }
+  }, [maxExpandedHeight, sheetSnap, sheetHeightAnim]);
+
   const snapSheetTo = useCallback(
     (target: 'collapsed' | 'default' | 'expanded') => {
       if (Platform.OS !== 'web') {
@@ -151,7 +177,7 @@ export default function App() {
         target === 'collapsed'
           ? SHEET_COLLAPSED_HEIGHT
           : target === 'expanded'
-          ? SHEET_EXPANDED_HEIGHT
+          ? maxExpandedHeightRef.current
           : SHEET_DEFAULT_HEIGHT;
       dragStartHeightRef.current = toValue;
       Animated.spring(sheetHeightAnim, {
@@ -187,7 +213,7 @@ export default function App() {
           const nextHeight = Math.max(
             SHEET_COLLAPSED_HEIGHT - 15,
             Math.min(
-              SHEET_EXPANDED_HEIGHT + 20,
+              maxExpandedHeightRef.current,
               dragStartHeightRef.current - gestureState.dy
             )
           );
@@ -210,7 +236,7 @@ export default function App() {
           );
           const distDefault = Math.abs(finalEstHeight - SHEET_DEFAULT_HEIGHT);
           const distExpanded = Math.abs(
-            finalEstHeight - SHEET_EXPANDED_HEIGHT
+            finalEstHeight - maxExpandedHeightRef.current
           );
           if (distCollapsed <= distDefault && distCollapsed <= distExpanded) {
             snapSheetTo('collapsed');
@@ -898,14 +924,9 @@ export default function App() {
     const orderedModes = isRTL ? [...modes].reverse() : modes;
     const chosen = orderedModes[index] || 'now';
     setTimeMode(chosen);
+    setShowTimePicker(false);
     if (chosen === 'now') {
       setTargetDate(new Date());
-      setShowTimePicker(false);
-    } else {
-      if (Platform.OS === 'android') {
-        setAndroidPickerMode('time');
-        setShowTimePicker(true);
-      }
     }
   };
 
@@ -1325,7 +1346,16 @@ export default function App() {
       </MapView>
 
       {/* 2. Floating Top Card (iOS Liquid Glass / Android Material 3 Expressive) */}
-      <SafeAreaView style={styles.topFloatingSafe} pointerEvents="box-none">
+      <SafeAreaView
+        style={styles.topFloatingSafe}
+        pointerEvents="box-none"
+        onLayout={(e) => {
+          const { y, height } = e.nativeEvent.layout;
+          if (height > 0) {
+            setTopOverlayBottomY(y + height);
+          }
+        }}
+      >
         <AdaptiveSurface intensity={60} tonalLevel="high" style={styles.topGlassCard}>
           <View style={[styles.topHeaderRow, { flexDirection: rowDir }]}>
             <AdaptivePressable
