@@ -25,13 +25,16 @@ import DateTimePicker, {
   DateTimePickerEvent,
 } from '@react-native-community/datetimepicker';
 import SegmentedControl from '@react-native-segmented-control/segmented-control';
-import { BlurView } from 'expo-blur';
-import { GlassView, isLiquidGlassAvailable } from 'expo-glass-effect';
-import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
 import { Ionicons } from '@expo/vector-icons';
+import { IS_ANDROID, THEME } from './src/theme/platformTheme';
+import {
+  AdaptivePressable,
+  AdaptiveSurface,
+  M3ExpressiveSegmentedControl,
+} from './src/components/PlatformUI';
 import {
   DankalDirection,
   Language,
@@ -75,61 +78,6 @@ const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 const SHEET_COLLAPSED_HEIGHT = 132;
 const SHEET_DEFAULT_HEIGHT = Math.round(SCREEN_HEIGHT * 0.55);
 const SHEET_EXPANDED_HEIGHT = Math.round(SCREEN_HEIGHT * 0.82);
-
-const HAS_NATIVE_LIQUID_GLASS =
-  Platform.OS === 'ios' &&
-  typeof isLiquidGlassAvailable === 'function' &&
-  isLiquidGlassAvailable();
-
-/**
- * Reusable iOS Liquid Glass Surface:
- * Uses Apple's native iOS 26 `UIGlassEffect` (`GlassView`) when available,
- * and falls back to `UIVisualEffectView` (`systemUltraThinMaterialDark`) with specular rim highlights.
- */
-function LiquidGlassCard({
-  children,
-  style,
-  intensity = 65,
-  interactive = false,
-}: {
-  children: React.ReactNode;
-  style?: ViewProps['style'];
-  intensity?: number;
-  interactive?: boolean;
-}) {
-  if (HAS_NATIVE_LIQUID_GLASS) {
-    return (
-      <GlassView
-        glassEffectStyle="regular"
-        colorScheme="dark"
-        isInteractive={interactive}
-        style={[styles.liquidGlassBase, style]}
-      >
-        {children}
-      </GlassView>
-    );
-  }
-  return (
-    <BlurView
-      intensity={intensity}
-      tint="systemUltraThinMaterialDark"
-      style={[styles.liquidGlassBase, styles.liquidGlassFallback, style]}
-    >
-      <LinearGradient
-        colors={[
-          'rgba(255, 255, 255, 0.14)',
-          'rgba(255, 255, 255, 0.03)',
-          'rgba(255, 255, 255, 0.0)',
-        ]}
-        start={{ x: 0.1, y: 0 }}
-        end={{ x: 0.9, y: 1 }}
-        style={StyleSheet.absoluteFill}
-        pointerEvents="none"
-      />
-      {children}
-    </BlurView>
-  );
-}
 
 export default function App() {
   const mapRef = useRef<MapView | null>(null);
@@ -1376,22 +1324,21 @@ export default function App() {
         )}
       </MapView>
 
-      {/* 2. Floating iOS Liquid Glass Top Card */}
+      {/* 2. Floating Top Card (iOS Liquid Glass / Android Material 3 Expressive) */}
       <SafeAreaView style={styles.topFloatingSafe} pointerEvents="box-none">
-        <LiquidGlassCard intensity={60} style={styles.topGlassCard}>
+        <AdaptiveSurface intensity={60} tonalLevel="high" style={styles.topGlassCard}>
           <View style={[styles.topHeaderRow, { flexDirection: rowDir }]}>
-            <TouchableOpacity
+            <AdaptivePressable
               style={[styles.originSelectorBtn, { flexDirection: rowDir }]}
               onPress={() => {
                 triggerHaptic('light');
                 setShowOriginSheet(true);
               }}
-              activeOpacity={0.75}
             >
               <Ionicons
                 name={activeOrigin.isGps ? 'navigate-circle' : 'location'}
                 size={20}
-                color="#0A84FF"
+                color={THEME.primary}
               />
               <View
                 style={{
@@ -1410,46 +1357,44 @@ export default function App() {
               <Ionicons
                 name="chevron-down"
                 size={15}
-                color="rgba(255,255,255,0.55)"
+                color={THEME.onSurfaceVariant}
               />
-            </TouchableOpacity>
+            </AdaptivePressable>
 
-            <TouchableOpacity
+            <AdaptivePressable
               style={styles.glassCircleIconBtn}
               onPress={() => handleUseMyGps(false)}
-              activeOpacity={0.75}
             >
               {locatingGps ? (
-                <ActivityIndicator size="small" color="#64D2FF" />
+                <ActivityIndicator size="small" color={THEME.primary} />
               ) : (
                 <Ionicons
                   name="locate"
                   size={18}
-                  color={activeOrigin.isGps ? '#64D2FF' : '#F8FAFC'}
+                  color={activeOrigin.isGps ? THEME.primary : THEME.onSurface}
                 />
               )}
-            </TouchableOpacity>
+            </AdaptivePressable>
 
-            <TouchableOpacity
+            <AdaptivePressable
               style={styles.glassLangBtn}
               onPress={() => {
                 triggerHaptic('selection');
                 setLang((prev) => (prev === 'he' ? 'en' : 'he'));
               }}
-              activeOpacity={0.75}
             >
               <Text style={styles.langPillText}>
                 {lang === 'he' ? 'EN' : 'עב'}
               </Text>
-            </TouchableOpacity>
+            </AdaptivePressable>
           </View>
 
-          {/* Non-Scrolling 4-Pill Direction Bar (No Clipped Text!) */}
+          {/* Non-Scrolling 4-Pill Direction Bar */}
           <View style={[styles.directionBarRow, { flexDirection: rowDir }]}>
             {directionOptions.map((opt) => {
               const active = direction === opt.id;
               return (
-                <TouchableOpacity
+                <AdaptivePressable
                   key={opt.id}
                   style={[
                     styles.directionChip,
@@ -1459,7 +1404,6 @@ export default function App() {
                     triggerHaptic('selection');
                     setDirection(opt.id);
                   }}
-                  activeOpacity={0.8}
                 >
                   <Text
                     style={[
@@ -1472,31 +1416,39 @@ export default function App() {
                   >
                     {opt.label}
                   </Text>
-                </TouchableOpacity>
+                </AdaptivePressable>
               );
             })}
           </View>
 
-          {/* Native Segmented Control: Leave Now | Depart At | Arrive By */}
+          {/* Segmented Control: iOS Native UISegmentedControl / Android M3 Expressive Connected Pill Buttons */}
           <View style={styles.segmentedWrapper}>
-            <NativeSegmentedControl
-              values={segmentedValues}
-              selectedIndex={segmentedSelectedIndex}
-              onChange={(event: {
-                nativeEvent: { selectedSegmentIndex: number };
-              }) => {
-                handleTimeModeChange(event.nativeEvent.selectedSegmentIndex);
-              }}
-              appearance="dark"
-              tintColor="#0A84FF"
-              fontStyle={{ color: '#E2E8F0', fontSize: 12, fontWeight: '600' }}
-              activeFontStyle={{
-                color: '#FFFFFF',
-                fontSize: 12,
-                fontWeight: '700',
-              }}
-              style={{ height: 32 }}
-            />
+            {IS_ANDROID ? (
+              <M3ExpressiveSegmentedControl
+                values={segmentedValues}
+                selectedIndex={segmentedSelectedIndex}
+                onSelect={handleTimeModeChange}
+              />
+            ) : (
+              <NativeSegmentedControl
+                values={segmentedValues}
+                selectedIndex={segmentedSelectedIndex}
+                onChange={(event: {
+                  nativeEvent: { selectedSegmentIndex: number };
+                }) => {
+                  handleTimeModeChange(event.nativeEvent.selectedSegmentIndex);
+                }}
+                appearance="dark"
+                tintColor="#0A84FF"
+                fontStyle={{ color: '#E2E8F0', fontSize: 12, fontWeight: '600' }}
+                activeFontStyle={{
+                  color: '#FFFFFF',
+                  fontSize: 12,
+                  fontWeight: '700',
+                }}
+                style={{ height: 32 }}
+              />
+            )}
           </View>
 
           {timeMode !== 'now' && (
@@ -1565,12 +1517,13 @@ export default function App() {
               onChange={handleTimePickerChange}
             />
           )}
-        </LiquidGlassCard>
+        </AdaptiveSurface>
 
         {/* Live Get-Off Alert Floating Banner */}
         {activeAlertBanner && (
-          <LiquidGlassCard
+          <AdaptiveSurface
             intensity={80}
+            tonalLevel="high"
             style={[
               styles.getOffAlertCard,
               activeAlertBanner.level === 'prepare' &&
@@ -1585,15 +1538,15 @@ export default function App() {
             <Text style={[styles.getOffAlertBody, { textAlign }]}>
               {activeAlertBanner.body}
             </Text>
-          </LiquidGlassCard>
+          </AdaptiveSurface>
         )}
       </SafeAreaView>
 
-      {/* 3. Interactive Collapsible / Draggable iOS Liquid Glass Bottom Sheet */}
+      {/* 3. Interactive Collapsible / Draggable Bottom Sheet (iOS Liquid Glass / Android M3 Expressive Sheet) */}
       <Animated.View
         style={[styles.bottomSheetContainer, { height: sheetHeightAnim }]}
       >
-        <LiquidGlassCard intensity={75} style={styles.bottomSheetGlass}>
+        <AdaptiveSurface intensity={75} tonalLevel="low" style={styles.bottomSheetGlass}>
           {/* Draggable & Tappable Grabber Zone */}
           <View {...panResponder.panHandlers} style={styles.grabberTouchArea}>
             <View style={styles.sheetGrabber} />
@@ -2677,7 +2630,7 @@ export default function App() {
               </ScrollView>
             </View>
           )}
-        </LiquidGlassCard>
+        </AdaptiveSurface>
       </Animated.View>
 
       {/* 4. Native iOS PageSheet Modal for Picking Origin (Current GPS + Free Search + Presets) */}
@@ -3149,7 +3102,7 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   topGlassCard: {
-    borderRadius: 24,
+    borderRadius: IS_ANDROID ? 28 : 24,
     padding: 11,
     gap: 9,
     shadowColor: '#000',
@@ -3192,47 +3145,56 @@ const styles = StyleSheet.create({
   },
   originSelectorBtn: {
     flex: 1,
-    backgroundColor: 'rgba(255, 255, 255, 0.08)',
-    paddingHorizontal: 11,
-    paddingVertical: 7,
-    borderRadius: 16,
+    backgroundColor: IS_ANDROID
+      ? THEME.surfaceContainerHighest
+      : 'rgba(255, 255, 255, 0.08)',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: IS_ANDROID ? 28 : 16,
     alignItems: 'center',
     gap: 8,
-    borderWidth: 1,
+    borderWidth: IS_ANDROID ? 0 : 1,
     borderColor: 'rgba(255, 255, 255, 0.14)',
+    overflow: 'hidden',
   },
   originCaption: {
-    color: 'rgba(255, 255, 255, 0.58)',
+    color: THEME.onSurfaceVariant,
     fontSize: 10,
     fontWeight: '600',
   },
   originMainText: {
-    color: '#FFFFFF',
+    color: THEME.onSurface,
     fontSize: 14,
     fontWeight: '700',
   },
   glassCircleIconBtn: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: 'rgba(255, 255, 255, 0.09)',
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: IS_ANDROID
+      ? THEME.surfaceContainerHighest
+      : 'rgba(255, 255, 255, 0.09)',
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 1,
+    borderWidth: IS_ANDROID ? 0 : 1,
     borderColor: 'rgba(255, 255, 255, 0.16)',
+    overflow: 'hidden',
   },
   glassLangBtn: {
-    height: 38,
-    paddingHorizontal: 12,
-    borderRadius: 19,
-    backgroundColor: 'rgba(255, 255, 255, 0.09)',
+    height: 40,
+    paddingHorizontal: 13,
+    borderRadius: 20,
+    backgroundColor: IS_ANDROID
+      ? THEME.surfaceContainerHighest
+      : 'rgba(255, 255, 255, 0.09)',
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 1,
+    borderWidth: IS_ANDROID ? 0 : 1,
     borderColor: 'rgba(255, 255, 255, 0.16)',
+    overflow: 'hidden',
   },
   langPillText: {
-    color: '#FFFFFF',
+    color: THEME.onSurface,
     fontSize: 12,
     fontWeight: '800',
   },
@@ -3243,27 +3205,36 @@ const styles = StyleSheet.create({
   },
   directionChip: {
     flex: 1,
-    backgroundColor: 'rgba(255, 255, 255, 0.07)',
+    backgroundColor: IS_ANDROID
+      ? THEME.surfaceContainerLow
+      : 'rgba(255, 255, 255, 0.07)',
     paddingHorizontal: 6,
-    paddingVertical: 6,
-    borderRadius: 12,
+    paddingVertical: IS_ANDROID ? 7 : 6,
+    borderRadius: IS_ANDROID ? 16 : 12,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.12)',
+    borderColor: IS_ANDROID
+      ? THEME.outline
+      : 'rgba(255, 255, 255, 0.12)',
     alignItems: 'center',
     justifyContent: 'center',
+    overflow: 'hidden',
   },
   directionChipActive: {
-    backgroundColor: 'rgba(255, 69, 58, 0.78)',
-    borderColor: 'rgba(255, 255, 255, 0.35)',
+    backgroundColor: IS_ANDROID
+      ? THEME.errorContainer
+      : 'rgba(255, 69, 58, 0.78)',
+    borderColor: IS_ANDROID ? THEME.error : 'rgba(255, 255, 255, 0.35)',
   },
   directionChipText: {
-    color: 'rgba(255, 255, 255, 0.78)',
+    color: IS_ANDROID
+      ? THEME.onSurfaceVariant
+      : 'rgba(255, 255, 255, 0.78)',
     fontSize: 10.5,
     fontWeight: '600',
     textAlign: 'center',
   },
   directionChipTextActive: {
-    color: '#FFFFFF',
+    color: IS_ANDROID ? THEME.onErrorContainer : '#FFFFFF',
     fontWeight: '800',
   },
   segmentedWrapper: {
@@ -3309,22 +3280,24 @@ const styles = StyleSheet.create({
   },
   bottomSheetGlass: {
     flex: 1,
-    borderTopLeftRadius: 30,
-    borderTopRightRadius: 30,
+    borderTopLeftRadius: THEME.sheetRadius,
+    borderTopRightRadius: THEME.sheetRadius,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.22)',
+    borderColor: THEME.outline,
   },
   grabberTouchArea: {
-    paddingTop: 9,
-    paddingBottom: 5,
+    paddingTop: IS_ANDROID ? 12 : 9,
+    paddingBottom: IS_ANDROID ? 8 : 5,
     alignItems: 'center',
     justifyContent: 'center',
   },
   sheetGrabber: {
-    width: 40,
-    height: 5,
+    width: IS_ANDROID ? 32 : 40,
+    height: IS_ANDROID ? 4 : 5,
     borderRadius: 2.5,
-    backgroundColor: 'rgba(255, 255, 255, 0.38)',
+    backgroundColor: IS_ANDROID
+      ? 'rgba(196, 198, 208, 0.45)'
+      : 'rgba(255, 255, 255, 0.38)',
   },
   collapseChevronBtn: {
     position: 'absolute',
@@ -3415,19 +3388,23 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   stationCard: {
-    backgroundColor: 'rgba(255, 255, 255, 0.06)',
-    borderRadius: 22,
+    backgroundColor: IS_ANDROID
+      ? THEME.surfaceContainer
+      : 'rgba(255, 255, 255, 0.06)',
+    borderRadius: THEME.cardRadius,
     padding: 13,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.14)',
+    borderColor: THEME.outlineVariant,
     gap: 10,
   },
   stationCardSelected: {
-    borderColor: 'rgba(100, 210, 255, 0.55)',
-    backgroundColor: 'rgba(255, 255, 255, 0.09)',
+    borderColor: IS_ANDROID ? THEME.primary : 'rgba(100, 210, 255, 0.55)',
+    backgroundColor: IS_ANDROID
+      ? THEME.surfaceContainerHigh
+      : 'rgba(255, 255, 255, 0.09)',
   },
   stationCardFastest: {
-    borderColor: 'rgba(48, 209, 88, 0.7)',
+    borderColor: IS_ANDROID ? THEME.tertiary : 'rgba(48, 209, 88, 0.7)',
     borderWidth: 1.5,
   },
   cardHeaderRow: {
@@ -3531,16 +3508,20 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   busRowCard: {
-    backgroundColor: 'rgba(255, 255, 255, 0.06)',
-    borderRadius: 16,
+    backgroundColor: IS_ANDROID
+      ? THEME.surfaceContainerHigh
+      : 'rgba(255, 255, 255, 0.06)',
+    borderRadius: THEME.innerCardRadius,
     padding: 10,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.12)',
+    borderColor: THEME.outlineVariant,
     gap: 6,
   },
   busRowCardPrimary: {
-    borderColor: 'rgba(10, 132, 255, 0.55)',
-    backgroundColor: 'rgba(10, 132, 255, 0.14)',
+    borderColor: IS_ANDROID ? THEME.primary : 'rgba(10, 132, 255, 0.55)',
+    backgroundColor: IS_ANDROID
+      ? THEME.secondaryContainer
+      : 'rgba(10, 132, 255, 0.14)',
   },
   busRowHeader: {
     alignItems: 'center',
@@ -3556,13 +3537,13 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    backgroundColor: '#0A84FF',
-    paddingHorizontal: 9,
+    backgroundColor: IS_ANDROID ? THEME.primaryContainer : '#0A84FF',
+    paddingHorizontal: 10,
     paddingVertical: 5,
-    borderRadius: 10,
+    borderRadius: IS_ANDROID ? 14 : 10,
   },
   busNumText: {
-    color: '#FFFFFF',
+    color: IS_ANDROID ? THEME.onPrimaryContainer : '#FFFFFF',
     fontSize: 14,
     fontWeight: '800',
   },
@@ -3717,33 +3698,38 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   liveTrackingFullBtn: {
-    backgroundColor: 'rgba(10, 132, 255, 0.25)',
-    borderWidth: 1,
+    backgroundColor: IS_ANDROID
+      ? THEME.primaryContainer
+      : 'rgba(10, 132, 255, 0.25)',
+    borderWidth: IS_ANDROID ? 0 : 1,
     borderColor: 'rgba(100, 210, 255, 0.55)',
-    borderRadius: 18,
-    paddingVertical: 11,
-    paddingHorizontal: 14,
+    borderRadius: IS_ANDROID ? 28 : 18,
+    paddingVertical: IS_ANDROID ? 13 : 11,
+    paddingHorizontal: 16,
     alignItems: 'center',
     gap: 10,
+    elevation: IS_ANDROID ? 4 : 0,
   },
   liveTrackingFullBtnActive: {
-    backgroundColor: 'rgba(255, 69, 58, 0.25)',
+    backgroundColor: IS_ANDROID
+      ? THEME.errorContainer
+      : 'rgba(255, 69, 58, 0.25)',
     borderColor: 'rgba(255, 105, 97, 0.65)',
   },
   liveTrackingIconBadge: {
     width: 30,
     height: 30,
     borderRadius: 15,
-    backgroundColor: '#0A84FF',
+    backgroundColor: IS_ANDROID ? THEME.primary : '#0A84FF',
     alignItems: 'center',
     justifyContent: 'center',
   },
   liveTrackingIconBadgeActive: {
-    backgroundColor: '#FF453A',
+    backgroundColor: IS_ANDROID ? THEME.error : '#FF453A',
   },
   liveTrackingFullBtnText: {
     flex: 1,
-    color: '#FFFFFF',
+    color: IS_ANDROID ? THEME.onPrimaryContainer : '#FFFFFF',
     fontSize: 14,
     fontWeight: '800',
   },
@@ -3961,7 +3947,7 @@ const styles = StyleSheet.create({
   },
   modalContainer: {
     flex: 1,
-    backgroundColor: '#0A0E17',
+    backgroundColor: IS_ANDROID ? THEME.surface : '#0A0E17',
   },
   modalHeader: {
     paddingHorizontal: 18,
