@@ -1,5 +1,6 @@
 import React from 'react';
 import {
+  I18nManager,
   Platform,
   Pressable,
   PressableProps,
@@ -9,19 +10,32 @@ import {
   ViewProps,
 } from 'react-native';
 import { BlurView } from 'expo-blur';
-import { GlassView, isLiquidGlassAvailable } from 'expo-glass-effect';
+import {
+  GlassView,
+  isGlassEffectAPIAvailable,
+  isLiquidGlassAvailable,
+} from 'expo-glass-effect';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { IS_ANDROID, THEME } from '../theme/platformTheme';
 
-const HAS_NATIVE_LIQUID_GLASS =
-  Platform.OS === 'ios' &&
-  typeof isLiquidGlassAvailable === 'function' &&
-  isLiquidGlassAvailable();
+let hasNativeLiquidGlass = false;
+if (Platform.OS === 'ios') {
+  try {
+    hasNativeLiquidGlass =
+      typeof isLiquidGlassAvailable === 'function' &&
+      isLiquidGlassAvailable() &&
+      typeof isGlassEffectAPIAvailable === 'function' &&
+      isGlassEffectAPIAvailable();
+  } catch {
+    hasNativeLiquidGlass = false;
+  }
+}
 
 /**
  * AdaptiveSurface:
- * - On iOS: Apple Liquid Glass (`UIGlassEffect` / `systemUltraThinMaterialDark` + specular highlight).
+ * - On iOS: Apple Liquid Glass (`UIGlassEffect` guarded by BOTH `isLiquidGlassAvailable` AND `isGlassEffectAPIAvailable`),
+ *   falling back to `systemUltraThinMaterialDark` + specular highlight.
  * - On Android: Material 3 Expressive Tonal Container (`surfaceContainer` + subtle tonal outline & elevation).
  */
 export function AdaptiveSurface({
@@ -30,12 +44,14 @@ export function AdaptiveSurface({
   intensity = 65,
   interactive = false,
   tonalLevel = 'container',
+  glassTintColor,
 }: {
   children: React.ReactNode;
   style?: ViewProps['style'];
   intensity?: number;
   interactive?: boolean;
   tonalLevel?: 'low' | 'container' | 'high';
+  glassTintColor?: string;
 }) {
   if (IS_ANDROID) {
     const bg =
@@ -45,23 +61,18 @@ export function AdaptiveSurface({
         ? THEME.surfaceContainerHigh
         : THEME.surfaceContainer;
     return (
-      <View
-        style={[
-          styles.androidSurfaceBase,
-          { backgroundColor: bg },
-          style,
-        ]}
-      >
+      <View style={[styles.androidSurfaceBase, { backgroundColor: bg }, style]}>
         {children}
       </View>
     );
   }
 
-  if (HAS_NATIVE_LIQUID_GLASS) {
+  if (hasNativeLiquidGlass) {
     return (
       <GlassView
         glassEffectStyle="regular"
         colorScheme="dark"
+        tintColor={glassTintColor}
         isInteractive={interactive}
         style={[styles.iosGlassBase, style]}
       >
@@ -94,7 +105,7 @@ export function AdaptiveSurface({
 
 /**
  * AdaptivePressable:
- * - On Android: Native Material 3 `android_ripple` ink splash + expressive press scale feel.
+ * - On Android: Native Material 3 `android_ripple` ink splash.
  * - On iOS: Clean opacity feedback.
  */
 export function AdaptivePressable({
@@ -126,42 +137,45 @@ export function AdaptivePressable({
 }
 
 /**
- * M3ExpressiveSegmentedControl (Android only):
- * Renders Material 3 Expressive Connected Pill Button Group with checkmark icon on the selected segment,
- * rounded outer pill caps, and native Android ripple.
+ * M3ExpressiveSegmentedControl (Android):
+ * Correctly handles both LTR and Hebrew-RTL Android system locales (`I18nManager.isRTL`)
+ * without double-reversing segments or flipping outer rounded caps onto inner dividers.
  */
 export function M3ExpressiveSegmentedControl({
   values,
   selectedIndex,
   onSelect,
+  isRTL,
 }: {
   values: string[];
   selectedIndex: number;
   onSelect: (index: number) => void;
+  isRTL: boolean;
 }) {
+  // Match desired visual direction relative to the OS layout engine
+  const flexDirection =
+    isRTL !== I18nManager.isRTL ? ('row-reverse' as const) : ('row' as const);
+
   return (
-    <View style={styles.m3SegContainer}>
+    <View style={[styles.m3SegContainer, { flexDirection }]}>
       {values.map((label, idx) => {
         const selected = idx === selectedIndex;
-        const isFirst = idx === 0;
         const isLast = idx === values.length - 1;
         return (
           <View
             key={label}
             style={[
               styles.m3SegClip,
-              isFirst && styles.m3SegFirst,
-              isLast && styles.m3SegLast,
-              !isLast && styles.m3SegDividerRight,
+              !isLast &&
+                (isRTL
+                  ? { borderLeftWidth: 1, borderLeftColor: THEME.outline }
+                  : { borderRightWidth: 1, borderRightColor: THEME.outline }),
             ]}
           >
             <Pressable
               android_ripple={{ color: THEME.rippleColor, foreground: true }}
               onPress={() => onSelect(idx)}
-              style={[
-                styles.m3SegBtn,
-                selected && styles.m3SegBtnSelected,
-              ]}
+              style={[styles.m3SegBtn, selected && styles.m3SegBtnSelected]}
             >
               {selected && (
                 <Ionicons
@@ -171,10 +185,7 @@ export function M3ExpressiveSegmentedControl({
                 />
               )}
               <Text
-                style={[
-                  styles.m3SegText,
-                  selected && styles.m3SegTextSelected,
-                ]}
+                style={[styles.m3SegText, selected && styles.m3SegTextSelected]}
                 numberOfLines={1}
               >
                 {label}
@@ -203,7 +214,6 @@ const styles = StyleSheet.create({
     elevation: 6,
   },
   m3SegContainer: {
-    flexDirection: 'row',
     height: 38,
     borderRadius: 20,
     borderWidth: 1,
@@ -214,18 +224,6 @@ const styles = StyleSheet.create({
   m3SegClip: {
     flex: 1,
     overflow: 'hidden',
-  },
-  m3SegFirst: {
-    borderTopLeftRadius: 19,
-    borderBottomLeftRadius: 19,
-  },
-  m3SegLast: {
-    borderTopRightRadius: 19,
-    borderBottomRightRadius: 19,
-  },
-  m3SegDividerRight: {
-    borderRightWidth: 1,
-    borderRightColor: THEME.outline,
   },
   m3SegBtn: {
     flex: 1,

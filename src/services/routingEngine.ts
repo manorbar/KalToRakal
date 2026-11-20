@@ -1,5 +1,4 @@
 import rawData from '../data/dankal_data.json';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   DankalDataset,
   DankalDirection,
@@ -13,37 +12,24 @@ import {
 
 const REMOTE_GTFS_JSON_URL =
   'https://raw.githubusercontent.com/manorbar/KalToRakal/main/src/data/dankal_data.json';
-const CACHED_GTFS_KEY = 'kaltorakal_cached_gtfs_v1';
 
-// Active dataset starts with the bundled offline JSON and silently upgrades if newer remote data is cached/fetched
 let activeDataset: DankalDataset = rawData as unknown as DankalDataset;
 
+export function getActiveDataset(): DankalDataset {
+  return activeDataset;
+}
+
 /**
- * Loads any previously cached GTFS dataset from AsyncStorage, then checks GitHub Raw
- * in the background to silently refresh the Dankal feeder graph when the weekly/nightly Action updates it.
+ * Silently checks GitHub Raw in the background for a newer GTFS dataset.
+ * Intentionally avoids storing >1MB JSON in Android AsyncStorage (2MB SQLite CursorWindow limit).
  */
 export async function syncLatestGtfsDataset(): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 6000);
   try {
-    const cachedStr = await AsyncStorage.getItem(CACHED_GTFS_KEY);
-    if (cachedStr) {
-      const parsed = JSON.parse(cachedStr) as DankalDataset;
-      if (
-        parsed?.generated_at &&
-        parsed.generated_at > activeDataset.generated_at &&
-        Array.isArray(parsed.stations)
-      ) {
-        activeDataset = parsed;
-      }
-    }
-  } catch {
-    // ignore storage read error
-  }
-
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 6000);
-    const resp = await fetch(REMOTE_GTFS_JSON_URL, { signal: controller.signal });
-    clearTimeout(timer);
+    const resp = await fetch(REMOTE_GTFS_JSON_URL, {
+      signal: controller.signal,
+    });
     if (!resp.ok) return false;
     const remoteData = (await resp.json()) as DankalDataset;
     if (
@@ -52,11 +38,12 @@ export async function syncLatestGtfsDataset(): Promise<boolean> {
       Array.isArray(remoteData.stations)
     ) {
       activeDataset = remoteData;
-      await AsyncStorage.setItem(CACHED_GTFS_KEY, JSON.stringify(remoteData));
       return true;
     }
   } catch {
-    // offline or timeout — bundled dataset continues working seamlessly
+    // offline or timeout — bundled dataset works seamlessly
+  } finally {
+    clearTimeout(timer);
   }
   return false;
 }
@@ -74,7 +61,6 @@ const AGENCY_NAMES: Record<string, { he: string; en: string }> = {
   '37': { he: 'אקסטרה', en: 'Extra' },
 };
 
-// Realistic escalator / security gate buffer for the 10 deep underground Red Line stations
 export const UNDERGROUND_PLATFORM_BUFFER_MIN = 2.5;
 
 export function haversineMeters(
@@ -94,9 +80,6 @@ export function haversineMeters(
   return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-/**
- * Checks whether coordinates are within reasonable range (~18km) of the Dankal Gush Dan service area.
- */
 export function isWithinGushDanServiceArea(lat: number, lon: number): boolean {
   let minDist = Infinity;
   for (const st of activeDataset.stations) {
@@ -107,14 +90,50 @@ export function isWithinGushDanServiceArea(lat: number, lon: number): boolean {
 }
 
 /**
- * Checks if a given Date falls inside typical Shabbat transit shutdown hours in Israel
- * (Friday after ~16:00 through Saturday before ~19:00).
+ * Extracts day-of-week (0=Sun..6=Sat) and minutes-from-midnight in Israel time (Asia/Jerusalem),
+ * falling back to local Date fields if Intl timezone formatting is unavailable.
  */
+export function getIsraelTimeParts(d: Date): {
+  dayOfWeek: number;
+  minutesOfDay: number;
+} {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Jerusalem',
+      weekday: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(d);
+    const weekdayMap: Record<string, number> = {
+      Sun: 0,
+      Mon: 1,
+      Tue: 2,
+      Wed: 3,
+      Thu: 4,
+      Fri: 5,
+      Sat: 6,
+    };
+    const wdStr = parts.find((p) => p.type === 'weekday')?.value || '';
+    const hr = Number(parts.find((p) => p.type === 'hour')?.value ?? d.getHours());
+    const mn = Number(parts.find((p) => p.type === 'minute')?.value ?? d.getMinutes());
+    const dayOfWeek = weekdayMap[wdStr] ?? d.getDay();
+    return {
+      dayOfWeek,
+      minutesOfDay: (hr % 24) * 60 + mn,
+    };
+  } catch {
+    return {
+      dayOfWeek: d.getDay(),
+      minutesOfDay: d.getHours() * 60 + d.getMinutes(),
+    };
+  }
+}
+
 export function isShabbatServiceWindow(d: Date): boolean {
-  const day = d.getDay(); // 5 = Friday, 6 = Saturday
-  const mins = d.getHours() * 60 + d.getMinutes();
-  if (day === 5 && mins >= 16 * 60) return true;
-  if (day === 6 && mins < 19 * 60) return true;
+  const { dayOfWeek, minutesOfDay } = getIsraelTimeParts(d);
+  if (dayOfWeek === 5 && minutesOfDay >= 16 * 60) return true;
+  if (dayOfWeek === 6 && minutesOfDay < 19 * 60) return true;
   return false;
 }
 
@@ -161,10 +180,6 @@ function formatMinFromMidnight(totalMin: number): string {
   const hh = Math.floor(normalized / 60);
   const mm = normalized % 60;
   return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
-}
-
-function dateToMinutesFromMidnight(d: Date): number {
-  return d.getHours() * 60 + d.getMinutes();
 }
 
 function parseEntranceHint(
@@ -346,10 +361,10 @@ function findCandidateFeederConnections(
 }
 
 interface CurlbusVisit {
-  line_name: string;
-  route_id: string | number;
-  operator_id: string | number;
-  eta: string;
+  line_name?: string;
+  route_id?: string | number;
+  operator_id?: string | number;
+  eta?: string | null;
 }
 
 async function fetchLiveArrivalsForStopCode(
@@ -363,14 +378,13 @@ async function fetchLiveArrivalsForStopCode(
   ];
 
   for (const url of urls) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5500);
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 5500);
       const resp = await fetch(url, {
         headers: { Accept: 'application/json' },
         signal: controller.signal,
       });
-      clearTimeout(timer);
       if (!resp.ok) continue;
       const data = await resp.json();
       const visits = data?.visits?.[stopCode];
@@ -379,6 +393,8 @@ async function fetchLiveArrivalsForStopCode(
       }
     } catch {
       // fallback
+    } finally {
+      clearTimeout(timer);
     }
   }
   return [];
@@ -394,8 +410,8 @@ export async function computeRoutesToNearestDankalStations(
 ): Promise<StationRecommendation[]> {
   const now = new Date();
   const effectiveDate = timeMode === 'now' ? now : targetDate;
-  const dayOfWeek = effectiveDate.getDay();
-  const targetMinOfDay = dateToMinutesFromMidnight(effectiveDate);
+  const { dayOfWeek, minutesOfDay: targetMinOfDay } =
+    getIsraelTimeParts(effectiveDate);
   const diffFromNowMinutes = (effectiveDate.getTime() - now.getTime()) / 60000;
 
   const useLiveSiri =
@@ -494,10 +510,14 @@ export async function computeRoutesToNearestDankalStations(
         m.walkFromBusMeters
       );
 
+      // Track per-route live SIRI match so one route's live arrival doesn't suppress GTFS fallback for other routes
+      let foundLiveForThisRoute = false;
+
       // 1. Live SIRI arrivals
       if (useLiveSiri) {
         const visits = liveVisitsByStopCode.get(m.originStopCode) || [];
         for (const v of visits) {
+          if (!v || typeof v.eta !== 'string' || v.eta.length < 16) continue;
           const isExactRoute = String(v.route_id) === m.routeId;
           const isSameLineAndAgency =
             String(v.line_name) === m.lineName &&
@@ -505,6 +525,8 @@ export async function computeRoutesToNearestDankalStations(
           if (!isExactRoute && !isSameLineAndAgency) continue;
 
           const etaDate = new Date(v.eta.replace(' ', 'T'));
+          if (Number.isNaN(etaDate.getTime())) continue;
+
           const waitMinRaw = Math.round(
             (etaDate.getTime() - effectiveDate.getTime()) / 60000
           );
@@ -514,7 +536,9 @@ export async function computeRoutesToNearestDankalStations(
           const spareMinutesToWalk = waitMinRaw - walkToBusMinutes;
           const urgency = computeUrgency(spareMinutesToWalk);
 
-          const busArrivalMinOfDay = dateToMinutesFromMidnight(etaDate);
+          // Always use Israel timezone consistently for busArrival / leaveHome / arriveStation
+          const { minutesOfDay: busArrivalMinOfDay } =
+            getIsraelTimeParts(etaDate);
           const leaveHomeMinOfDay = busArrivalMinOfDay - walkToBusMinutes;
           const arriveStationMinOfDay = Math.round(
             busArrivalMinOfDay +
@@ -529,10 +553,11 @@ export async function computeRoutesToNearestDankalStations(
               undergroundBufferMinutes
           );
 
-          const etaHHMM = v.eta.slice(11, 16);
+          const etaHHMM = formatMinFromMidnight(busArrivalMinOfDay);
           const dedupKey = `${m.lineName}_${etaHHMM}`;
           if (seenOptionKeys.has(dedupKey)) continue;
           seenOptionKeys.add(dedupKey);
+          foundLiveForThisRoute = true;
 
           liveBusOptions.push({
             id: `${dedupKey}_${m.originStopCode}`,
@@ -553,6 +578,7 @@ export async function computeRoutesToNearestDankalStations(
             nextBackupBusMinutesLater: null,
             nextBackupBusLine: null,
             leaveHomeFormatted: formatMinFromMidnight(leaveHomeMinOfDay),
+            leaveHomeMinutesOfDay: leaveHomeMinOfDay,
             etaFormatted: etaHHMM,
             arriveStationFormatted: formatMinFromMidnight(
               arriveStationMinOfDay
@@ -576,10 +602,22 @@ export async function computeRoutesToNearestDankalStations(
         }
       }
 
-      // 2. Scheduled GTFS timetable calculation (day-aware: Sun-Thu / Friday / Saturday)
-      if (!useLiveSiri || liveBusOptions.length === 0) {
+      // 2. Scheduled GTFS timetable calculation (per-route fallback, handles midnight rollover)
+      if (!useLiveSiri || !foundLiveForThisRoute) {
+        const effectiveTargetMin =
+          targetMinOfDay < 180 ? targetMinOfDay + 1440 : targetMinOfDay;
+
         for (const depMin of m.deps) {
-          const busAtOriginMin = Math.round(depMin + m.originOffsetMinutes);
+          let busAtOriginMin = Math.round(depMin + m.originOffsetMinutes);
+          // Align departures near midnight if target is in early-morning window (00:00-02:59)
+          if (targetMinOfDay < 180 && busAtOriginMin < 180) {
+            busAtOriginMin += 1440;
+          }
+          const refTarget =
+            targetMinOfDay < 180 && busAtOriginMin >= 1200
+              ? effectiveTargetMin
+              : targetMinOfDay;
+
           const arriveStationMin = Math.round(
             busAtOriginMin +
               m.rideMinutes +
@@ -589,17 +627,17 @@ export async function computeRoutesToNearestDankalStations(
           const leaveHomeMin = busAtOriginMin - walkToBusMinutes;
 
           if (timeMode === 'arrive_by') {
-            const earlyMargin = targetMinOfDay - arriveStationMin;
+            const earlyMargin = refTarget - arriveStationMin;
             if (earlyMargin < 0 || earlyMargin > 45) continue;
           } else {
-            const waitMin = busAtOriginMin - targetMinOfDay;
+            const waitMin = busAtOriginMin - refTarget;
             if (waitMin < walkToBusMinutes - 1 || waitMin > 45) continue;
           }
 
-          const waitMinRaw = busAtOriginMin - targetMinOfDay;
+          const waitMinRaw = busAtOriginMin - refTarget;
           const waitMinutes =
             timeMode === 'arrive_by'
-              ? Math.max(0, targetMinOfDay - arriveStationMin)
+              ? Math.max(0, refTarget - arriveStationMin)
               : Math.max(0, waitMinRaw);
 
           const spareMinutesToWalk =
@@ -642,6 +680,7 @@ export async function computeRoutesToNearestDankalStations(
             nextBackupBusMinutesLater: null,
             nextBackupBusLine: null,
             leaveHomeFormatted: formatMinFromMidnight(leaveHomeMin),
+            leaveHomeMinutesOfDay: leaveHomeMin,
             etaFormatted: etaHHMM,
             arriveStationFormatted: formatMinFromMidnight(arriveStationMin),
             rideMinutes: m.rideMinutes,
@@ -665,11 +704,11 @@ export async function computeRoutesToNearestDankalStations(
     }
 
     if (timeMode === 'arrive_by') {
+      // Numeric comparison handles midnight rollover (e.g. 1445 > 1430)
       liveBusOptions.sort((a, b) => {
-        const leaveCmp = b.leaveHomeFormatted.localeCompare(
-          a.leaveHomeFormatted
-        );
-        if (leaveCmp !== 0) return leaveCmp;
+        if (b.leaveHomeMinutesOfDay !== a.leaveHomeMinutesOfDay) {
+          return b.leaveHomeMinutesOfDay - a.leaveHomeMinutesOfDay;
+        }
         return a.intermediateStops.length - b.intermediateStops.length;
       });
     } else {
@@ -712,6 +751,10 @@ export async function computeRoutesToNearestDankalStations(
       timeMode === 'arrive_by'
         ? formatMinFromMidnight(targetMinOfDay)
         : formatMinFromMidnight(targetMinOfDay + walkMinutes);
+    const scooterArriveFormatted =
+      timeMode === 'arrive_by'
+        ? formatMinFromMidnight(targetMinOfDay)
+        : formatMinFromMidnight(targetMinOfDay + scooterMinutes);
 
     const nextTrainHeadwayMin =
       station.lines.length >= 2 ? '3.5–5' : '5–7';
@@ -725,6 +768,7 @@ export async function computeRoutesToNearestDankalStations(
       walkLeaveFormatted,
       walkArriveFormatted,
       scooterMinutes,
+      scooterArriveFormatted,
       bestTotalMinutes,
       bestMode,
       minutesSavedByBus,

@@ -79,6 +79,7 @@ export interface LiveBusOption {
   nextBackupBusMinutesLater: number | null;
   nextBackupBusLine: string | null;
   leaveHomeFormatted: string;
+  leaveHomeMinutesOfDay: number; // numeric minutes for safe midnight-rollover sorting
   etaFormatted: string;
   arriveStationFormatted: string;
   rideMinutes: number;
@@ -107,6 +108,7 @@ export interface StationRecommendation {
   walkLeaveFormatted: string;
   walkArriveFormatted: string;
   scooterMinutes: number;
+  scooterArriveFormatted: string;
   bestTotalMinutes: number;
   bestMode: 'bus' | 'walk';
   minutesSavedByBus: number;

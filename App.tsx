@@ -7,23 +7,30 @@ import {
   ScrollView,
   TouchableOpacity,
   ActivityIndicator,
-  SafeAreaView,
   StatusBar,
   Platform,
   Linking,
   Modal,
-  Dimensions,
   Animated,
   PanResponder,
   Vibration,
-  ViewProps,
   RefreshControl,
+  BackHandler,
+  I18nManager,
+  KeyboardAvoidingView,
+  useWindowDimensions,
 } from 'react-native';
+import {
+  SafeAreaProvider,
+  SafeAreaView,
+  useSafeAreaInsets,
+} from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import DateTimePicker, {
   DateTimePickerEvent,
 } from '@react-native-community/datetimepicker';
+import { StatusBar as ExpoStatusBar } from 'expo-status-bar';
 import SegmentedControl from '@react-native-segmented-control/segmented-control';
 import * as Haptics from 'expo-haptics';
 import * as Location from 'expo-location';
@@ -73,14 +80,62 @@ Notifications.setNotificationHandler({
 
 const NativeSegmentedControl =
   SegmentedControl as unknown as React.ComponentType<any>;
-const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
-const SHEET_COLLAPSED_HEIGHT = 132;
-const SHEET_DEFAULT_HEIGHT = Math.round(SCREEN_HEIGHT * 0.55);
-const SHEET_EXPANDED_HEIGHT = Math.round(SCREEN_HEIGHT * 0.82);
+/**
+ * Isolated footer ticker component so updating "Updated Xs ago" every 5s
+ * never re-renders the root App, MapView, or custom markers!
+ */
+function FooterSyncLabel({
+  footerBase,
+  lastUpdatedMs,
+  updatedJustNow,
+  updatedSecondsAgo,
+}: {
+  footerBase: string;
+  lastUpdatedMs: number;
+  updatedJustNow: string;
+  updatedSecondsAgo: string;
+}) {
+  const [secs, setSecs] = useState(0);
+  useEffect(() => {
+    if (!lastUpdatedMs) return;
+    setSecs(Math.max(0, Math.floor((Date.now() - lastUpdatedMs) / 1000)));
+    const timer = setInterval(() => {
+      setSecs(Math.max(0, Math.floor((Date.now() - lastUpdatedMs) / 1000)));
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [lastUpdatedMs]);
+
+  return (
+    <Text style={styles.footerInfo}>
+      {footerBase}
+      {lastUpdatedMs > 0
+        ? ` • ${
+            secs < 5
+              ? updatedJustNow
+              : updatedSecondsAgo.replace('{s}', String(secs))
+          }`
+        : ''}
+    </Text>
+  );
+}
 
 export default function App() {
+  return (
+    <SafeAreaProvider>
+      <MainApp />
+    </SafeAreaProvider>
+  );
+}
+
+function MainApp() {
   const mapRef = useRef<MapView | null>(null);
+  const { height: screenHeight } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+
+  const sheetCollapsedHeight = 128 + insets.bottom;
+  const sheetDefaultHeight = Math.round(screenHeight * 0.54);
+  const sheetMaxCeiling = Math.round(screenHeight * 0.82);
 
   const [lang, setLang] = useState<Language>('he');
   const [k, setK] = useState<number>(3);
@@ -122,6 +177,8 @@ export default function App() {
   } | null>(null);
 
   const locationSubRef = useRef<Location.LocationSubscription | null>(null);
+  const trackingSessionIdRef = useRef<number>(0);
+  const fetchRequestIdRef = useRef<number>(0);
   const firedAlertsRef = useRef<{
     prepareFired: boolean;
     getOffFired: boolean;
@@ -137,35 +194,50 @@ export default function App() {
     'collapsed' | 'default' | 'expanded'
   >('default');
   const sheetHeightAnim = useRef(
-    new Animated.Value(SHEET_DEFAULT_HEIGHT)
+    new Animated.Value(sheetDefaultHeight)
   ).current;
-  const dragStartHeightRef = useRef<number>(SHEET_DEFAULT_HEIGHT);
+  const dragStartHeightRef = useRef<number>(sheetDefaultHeight);
 
-  // Measure the floating top overlay so the expanded bottom sheet NEVER overlaps it (even with custom time row open)
+  // Measure the floating top overlay so the bottom sheet NEVER overlaps it (even on iPhone SE / iPad landscape / Android 15)
   const [topOverlayBottomY, setTopOverlayBottomY] = useState<number>(210);
-  const maxExpandedHeight = useMemo(
-    () =>
-      Math.max(
-        SHEET_DEFAULT_HEIGHT,
-        Math.min(
-          SHEET_EXPANDED_HEIGHT,
-          Math.floor(SCREEN_HEIGHT - topOverlayBottomY - 12)
-        )
-      ),
-    [topOverlayBottomY]
+  const availableBelowTop = Math.max(
+    sheetCollapsedHeight + 40,
+    Math.floor(screenHeight - topOverlayBottomY - 10)
   );
-  const maxExpandedHeightRef = useRef<number>(maxExpandedHeight);
+  const clampedDefaultHeight = Math.min(sheetDefaultHeight, availableBelowTop);
+  const maxExpandedHeight = Math.min(sheetMaxCeiling, availableBelowTop);
+
+  const sheetMetricsRef = useRef({
+    collapsed: sheetCollapsedHeight,
+    defaultH: clampedDefaultHeight,
+    expanded: maxExpandedHeight,
+  });
   useEffect(() => {
-    maxExpandedHeightRef.current = maxExpandedHeight;
-    if (sheetSnap === 'expanded') {
-      Animated.spring(sheetHeightAnim, {
-        toValue: maxExpandedHeight,
-        useNativeDriver: false,
-        damping: 22,
-        stiffness: 210,
-      }).start();
-    }
-  }, [maxExpandedHeight, sheetSnap, sheetHeightAnim]);
+    sheetMetricsRef.current = {
+      collapsed: sheetCollapsedHeight,
+      defaultH: clampedDefaultHeight,
+      expanded: maxExpandedHeight,
+    };
+    const targetVal =
+      sheetSnap === 'collapsed'
+        ? sheetCollapsedHeight
+        : sheetSnap === 'expanded'
+        ? maxExpandedHeight
+        : clampedDefaultHeight;
+    dragStartHeightRef.current = targetVal;
+    Animated.spring(sheetHeightAnim, {
+      toValue: targetVal,
+      useNativeDriver: false,
+      damping: 22,
+      stiffness: 210,
+    }).start();
+  }, [
+    sheetCollapsedHeight,
+    clampedDefaultHeight,
+    maxExpandedHeight,
+    sheetSnap,
+    sheetHeightAnim,
+  ]);
 
   const snapSheetTo = useCallback(
     (target: 'collapsed' | 'default' | 'expanded') => {
@@ -173,12 +245,13 @@ export default function App() {
         Haptics.selectionAsync();
       }
       setSheetSnap(target);
+      const { collapsed, defaultH, expanded } = sheetMetricsRef.current;
       const toValue =
         target === 'collapsed'
-          ? SHEET_COLLAPSED_HEIGHT
+          ? collapsed
           : target === 'expanded'
-          ? maxExpandedHeightRef.current
-          : SHEET_DEFAULT_HEIGHT;
+          ? expanded
+          : defaultH;
       dragStartHeightRef.current = toValue;
       Animated.spring(sheetHeightAnim, {
         toValue,
@@ -210,12 +283,10 @@ export default function App() {
           });
         },
         onPanResponderMove: (_, gestureState) => {
+          const { collapsed, expanded } = sheetMetricsRef.current;
           const nextHeight = Math.max(
-            SHEET_COLLAPSED_HEIGHT - 15,
-            Math.min(
-              maxExpandedHeightRef.current,
-              dragStartHeightRef.current - gestureState.dy
-            )
+            collapsed - 12,
+            Math.min(expanded, dragStartHeightRef.current - gestureState.dy)
           );
           sheetHeightAnim.setValue(nextHeight);
         },
@@ -227,17 +298,14 @@ export default function App() {
             cycleSheetSnap();
             return;
           }
+          const { collapsed, defaultH, expanded } = sheetMetricsRef.current;
           const finalEstHeight =
             dragStartHeightRef.current -
             gestureState.dy -
             gestureState.vy * 90;
-          const distCollapsed = Math.abs(
-            finalEstHeight - SHEET_COLLAPSED_HEIGHT
-          );
-          const distDefault = Math.abs(finalEstHeight - SHEET_DEFAULT_HEIGHT);
-          const distExpanded = Math.abs(
-            finalEstHeight - maxExpandedHeightRef.current
-          );
+          const distCollapsed = Math.abs(finalEstHeight - collapsed);
+          const distDefault = Math.abs(finalEstHeight - defaultH);
+          const distExpanded = Math.abs(finalEstHeight - expanded);
           if (distCollapsed <= distDefault && distCollapsed <= distExpanded) {
             snapSheetTo('collapsed');
           } else if (distExpanded < distDefault) {
@@ -268,7 +336,6 @@ export default function App() {
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [lastUpdatedMs, setLastUpdatedMs] = useState<number>(0);
-  const [secondsSinceUpdate, setSecondsSinceUpdate] = useState<number>(0);
   const [gpsError, setGpsError] = useState<string | null>(null);
   const [savedPlaces, setSavedPlaces] = useState<{
     home?: SavedPlace;
@@ -279,6 +346,10 @@ export default function App() {
 
   const t = STRINGS[lang];
   const isRTL = lang === 'he';
+  const latestOriginRef = useRef(activeOrigin);
+  latestOriginRef.current = activeOrigin;
+  const latestParamsRef = useRef({ k, timeMode, targetDate, direction });
+  latestParamsRef.current = { k, timeMode, targetDate, direction };
 
   const isOutOfServiceArea = useMemo(
     () => !isWithinGushDanServiceArea(activeOrigin.lat, activeOrigin.lon),
@@ -335,6 +406,7 @@ export default function App() {
   );
 
   const stopAllTracking = useCallback(() => {
+    trackingSessionIdRef.current += 1;
     if (locationSubRef.current) {
       locationSubRef.current.remove();
       locationSubRef.current = null;
@@ -355,6 +427,24 @@ export default function App() {
       stopAllTracking();
     };
   }, [stopAllTracking]);
+
+  // Android Hardware Back Button handler: close Active Journey or collapse expanded sheet instead of exiting app
+  useEffect(() => {
+    if (!IS_ANDROID) return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (selectedJourney) {
+        stopAllTracking();
+        setSelectedJourney(null);
+        return true;
+      }
+      if (sheetSnap === 'expanded') {
+        snapSheetTo('default');
+        return true;
+      }
+      return false;
+    });
+    return () => sub.remove();
+  }, [selectedJourney, sheetSnap, stopAllTracking, snapSheetTo]);
 
   const evaluateRouteProgress = useCallback(
     (lat: number, lon: number, journey: SelectedJourney) => {
@@ -410,13 +500,17 @@ export default function App() {
           const body = t.prepareToGetOffAlertBody
             .replace('{stop}', alightName)
             .replace('{station}', stName);
-          triggerHaptic('warning');
-          Vibration.vibrate(400);
+          if (IS_ANDROID) {
+            Vibration.vibrate(400);
+          } else {
+            triggerHaptic('warning');
+          }
           setActiveAlertBanner({ level: 'prepare', title, body });
           fireLocalNotification(title, body);
         }
 
         if (
+          lastStopIdx >= 0 &&
           (closestIdx === lastStopIdx || distToAlight <= 170) &&
           !firedAlertsRef.current.getOffFired
         ) {
@@ -427,8 +521,11 @@ export default function App() {
             .replace('{stop}', alightName)
             .replace('{m}', String(bus.walkFromBusMeters))
             .replace('{station}', stName);
-          triggerHaptic('error');
-          Vibration.vibrate([0, 500, 200, 500]);
+          if (IS_ANDROID) {
+            Vibration.vibrate([0, 500, 200, 500]);
+          } else {
+            triggerHaptic('error');
+          }
           setActiveAlertBanner({ level: 'get_off', title, body });
           fireLocalNotification(title, body);
         }
@@ -465,9 +562,14 @@ export default function App() {
     [fireLocalNotification, isRTL, t]
   );
 
+  const evaluateRouteProgressRef = useRef(evaluateRouteProgress);
+  evaluateRouteProgressRef.current = evaluateRouteProgress;
+
   const handleStartLiveTracking = async () => {
     if (!selectedJourney) return;
     stopAllTracking();
+    const mySessionId = trackingSessionIdRef.current;
+    const journeySnapshot = selectedJourney;
     triggerHaptic('light');
 
     try {
@@ -484,34 +586,64 @@ export default function App() {
       // ignore
     }
 
-    const { status } = await Location.requestForegroundPermissionsAsync();
-    if (status !== 'granted') {
+    if (trackingSessionIdRef.current !== mySessionId) return;
+
+    try {
+      const servicesEnabled = await Location.hasServicesEnabledAsync();
+      if (!servicesEnabled) {
+        setGpsError(
+          lang === 'he'
+            ? 'שירותי המיקום (GPS) כבויים במכשיר'
+            : 'Location services (GPS) are disabled'
+        );
+        return;
+      }
+
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (trackingSessionIdRef.current !== mySessionId) return;
+
+      if (status !== 'granted') {
+        setGpsError(
+          lang === 'he'
+            ? 'נדרשת הרשאת GPS למעקב חי'
+            : 'GPS permission required for live tracking'
+        );
+        return;
+      }
+
+      const sub = await Location.watchPositionAsync(
+        {
+          accuracy: Location.Accuracy.High,
+          distanceInterval: 15,
+          timeInterval: 3000,
+        },
+        (loc) => {
+          if (trackingSessionIdRef.current !== mySessionId) return;
+          evaluateRouteProgressRef.current(
+            loc.coords.latitude,
+            loc.coords.longitude,
+            journeySnapshot
+          );
+        }
+      );
+
+      // Guard against user exiting journey while watchPositionAsync was awaiting
+      if (trackingSessionIdRef.current !== mySessionId) {
+        sub.remove();
+        return;
+      }
+
+      locationSubRef.current = sub;
+      setIsTrackingRide(true);
+      setShowIntermediateStops(true);
+    } catch {
+      setIsTrackingRide(false);
       setGpsError(
         lang === 'he'
-          ? 'נדרשת הרשאת GPS למעקב חי'
-          : 'GPS permission required for live tracking'
+          ? 'לא ניתן להפעיל מעקב GPS כעת'
+          : 'Could not start live GPS tracking'
       );
-      return;
     }
-
-    setIsTrackingRide(true);
-    setShowIntermediateStops(true);
-
-    const sub = await Location.watchPositionAsync(
-      {
-        accuracy: Location.Accuracy.High,
-        distanceInterval: 15,
-        timeInterval: 3000,
-      },
-      (loc) => {
-        evaluateRouteProgress(
-          loc.coords.latitude,
-          loc.coords.longitude,
-          selectedJourney
-        );
-      }
-    );
-    locationSubRef.current = sub;
   };
 
   /**
@@ -527,6 +659,21 @@ export default function App() {
       focusSingleStation?: { lat: number; lon: number }
     ) => {
       if (!mapRef.current) return;
+
+      // If user is outside Gush Dan (e.g., Cupertino Simulator / Haifa), frame Tel Aviv Dankal corridor safely without exceeding MapKit 180deg delta limits!
+      if (!isWithinGushDanServiceArea(origLat, origLon)) {
+        mapRef.current.animateToRegion(
+          {
+            latitude: 32.065,
+            longitude: 34.795,
+            latitudeDelta: 0.08,
+            longitudeDelta: 0.08,
+          },
+          450
+        );
+        return;
+      }
+
       const points = [
         { latitude: origLat, longitude: origLon },
         ...(focusSingleStation
@@ -554,9 +701,10 @@ export default function App() {
         if (p.longitude > maxLon) maxLon = p.longitude;
       }
 
-      const latSpan = Math.max(0.016, (maxLat - minLat) * 1.65);
-      const lonSpan = Math.max(0.018, (maxLon - minLon) * 1.65);
-      const centerLat = (minLat + maxLat) / 2 - latSpan * 0.22;
+      const latSpan = Math.min(80, Math.max(0.016, (maxLat - minLat) * 1.65));
+      const lonSpan = Math.min(120, Math.max(0.018, (maxLon - minLon) * 1.65));
+      const rawCenterLat = (minLat + maxLat) / 2 - latSpan * 0.22;
+      const centerLat = Math.max(-85, Math.min(85, rawCenterLat));
       const centerLon = (minLon + maxLon) / 2;
 
       mapRef.current.animateToRegion(
@@ -582,6 +730,16 @@ export default function App() {
       dirVal: DankalDirection,
       silent = false
     ) => {
+      const myReqId = ++fetchRequestIdRef.current;
+
+      if (!isWithinGushDanServiceArea(lat, lon)) {
+        setRecommendations([]);
+        setLoading(false);
+        setRefreshing(false);
+        fitMapToStations(lat, lon, []);
+        return;
+      }
+
       if (!silent) setLoading(true);
       try {
         const res = await computeRoutesToNearestDankalStations(
@@ -592,6 +750,9 @@ export default function App() {
           dateVal,
           dirVal
         );
+        // Ignore stale out-of-order response if a newer request started while awaiting SIRI
+        if (fetchRequestIdRef.current !== myReqId) return;
+
         setRecommendations(res);
         if (res.length > 0 && !silent) {
           const fastest = [...res].sort((a, b) => {
@@ -612,18 +773,20 @@ export default function App() {
           fitMapToStations(lat, lon, res);
         }
         setLastUpdatedMs(Date.now());
-        setSecondsSinceUpdate(0);
       } catch (err) {
+        if (fetchRequestIdRef.current !== myReqId) return;
         console.error('Error computing routes:', err);
       } finally {
-        if (!silent) setLoading(false);
-        setRefreshing(false);
+        if (fetchRequestIdRef.current === myReqId) {
+          if (!silent) setLoading(false);
+          setRefreshing(false);
+        }
       }
     },
     [fitMapToStations]
   );
 
-  // On app launch: load Saved Places (Home/Work), sync latest GTFS in background, and attempt auto-GPS lock
+  // On app launch: load Saved Places (Home/Work) and sync latest GTFS in background using LATEST refs
   const bootInitDoneRef = useRef<boolean>(false);
   useEffect(() => {
     if (bootInitDoneRef.current) return;
@@ -638,22 +801,23 @@ export default function App() {
       } catch {
         // ignore
       }
-      // Silently check GitHub Raw for fresher nightly GTFS timetables
       syncLatestGtfsDataset().then((updated) => {
         if (updated) {
+          const orig = latestOriginRef.current;
+          const p = latestParamsRef.current;
           fetchRoutes(
-            activeOrigin.lat,
-            activeOrigin.lon,
-            k,
-            timeMode,
-            targetDate,
-            direction,
+            orig.lat,
+            orig.lon,
+            p.k,
+            p.timeMode,
+            p.targetDate,
+            p.direction,
             true
           );
         }
       });
     })();
-  }, []);
+  }, [fetchRoutes]);
 
   // Auto-refresh live SIRI ETAs every 30 seconds while in 'now' mode
   useEffect(() => {
@@ -679,17 +843,6 @@ export default function App() {
     direction,
     fetchRoutes,
   ]);
-
-  // Tick "Updated Xs ago" counter every 5 seconds
-  useEffect(() => {
-    if (!lastUpdatedMs) return;
-    const timer = setInterval(() => {
-      setSecondsSinceUpdate(
-        Math.max(0, Math.floor((Date.now() - lastUpdatedMs) / 1000))
-      );
-    }, 5000);
-    return () => clearInterval(timer);
-  }, [lastUpdatedMs]);
 
   const handleSaveCurrentPlace = async (slot: 'home' | 'work') => {
     triggerHaptic('success');
@@ -932,10 +1085,14 @@ export default function App() {
     setOriginSearchQuery('');
   };
 
-  const handleTimeModeChange = (index: number) => {
+  const handleTimeModeChange = (
+    index: number,
+    isLogicalIndex = false
+  ) => {
     triggerHaptic('selection');
     const modes: TimeMode[] = ['now', 'depart_at', 'arrive_by'];
-    const orderedModes = isRTL ? [...modes].reverse() : modes;
+    const shouldReverse = !isLogicalIndex && isRTL !== I18nManager.isRTL;
+    const orderedModes = shouldReverse ? [...modes].reverse() : modes;
     const chosen = orderedModes[index] || 'now';
     setTimeMode(chosen);
     setShowTimePicker(false);
@@ -977,22 +1134,20 @@ export default function App() {
     destLat: number,
     destLon: number,
     label: string,
-    mode: 'walking' | 'transit' = 'walking'
+    mode: 'walking' | 'bicycling' | 'transit' = 'walking'
   ) => {
     triggerHaptic('light');
     const encodedLabel = encodeURIComponent(label);
-    const iosFlag = mode === 'walking' ? 'w' : 'r';
-    const androidMode = mode === 'walking' ? 'w' : 'r';
+    const iosFlag = mode === 'walking' ? 'w' : mode === 'bicycling' ? 'w' : 'r';
+    const googleMapsUrl = `https://www.google.com/maps/dir/?api=1&origin=${activeOrigin.lat},${activeOrigin.lon}&destination=${destLat},${destLon}&travelmode=${mode}`;
     const url = Platform.select({
       ios: `maps://?saddr=${activeOrigin.lat},${activeOrigin.lon}&daddr=${destLat},${destLon}&dirflg=${iosFlag}&q=${encodedLabel}`,
-      android: `google.navigation:q=${destLat},${destLon}&mode=${androidMode}`,
-      default: `https://www.google.com/maps/dir/?api=1&origin=${activeOrigin.lat},${activeOrigin.lon}&destination=${destLat},${destLon}&travelmode=${mode}`,
+      android: googleMapsUrl,
+      default: googleMapsUrl,
     });
     if (url) {
       Linking.openURL(url).catch(() => {
-        Linking.openURL(
-          `https://www.google.com/maps/dir/?api=1&origin=${activeOrigin.lat},${activeOrigin.lon}&destination=${destLat},${destLon}&travelmode=${mode}`
-        );
+        Linking.openURL(googleMapsUrl);
       });
     }
   };
@@ -1109,19 +1264,38 @@ export default function App() {
     return null;
   }, [selectedJourney, selectedStationRec]);
 
-  const rowDir = isRTL ? ('row-reverse' as const) : ('row' as const);
+  // Prevent I18nManager.isRTL double-reversal on Hebrew-locale Android & iOS devices!
+  const rowDir =
+    isRTL !== I18nManager.isRTL ? ('row-reverse' as const) : ('row' as const);
   const textAlign = isRTL ? ('right' as const) : ('left' as const);
 
-  const segmentedValues = useMemo(() => {
-    const labels = [t.modeLeaveNow, t.modeDepartAt, t.modeArriveBy];
-    return isRTL ? [...labels].reverse() : labels;
-  }, [t, isRTL]);
+  const logicalTimeModes: TimeMode[] = useMemo(
+    () => ['now', 'depart_at', 'arrive_by'],
+    []
+  );
+  const logicalTimeLabels = useMemo(
+    () => [t.modeLeaveNow, t.modeDepartAt, t.modeArriveBy],
+    [t]
+  );
 
-  const segmentedSelectedIndex = useMemo(() => {
-    const modes: TimeMode[] = ['now', 'depart_at', 'arrive_by'];
-    const ordered = isRTL ? [...modes].reverse() : modes;
+  // On iOS UISegmentedControl: only manually reverse when desired language direction differs from OS RTL
+  const iosSegmentedValues = useMemo(() => {
+    const shouldReverse = isRTL !== I18nManager.isRTL;
+    return shouldReverse ? [...logicalTimeLabels].reverse() : logicalTimeLabels;
+  }, [logicalTimeLabels, isRTL]);
+
+  const iosSegmentedSelectedIndex = useMemo(() => {
+    const shouldReverse = isRTL !== I18nManager.isRTL;
+    const ordered = shouldReverse
+      ? [...logicalTimeModes].reverse()
+      : logicalTimeModes;
     return Math.max(0, ordered.indexOf(timeMode));
-  }, [timeMode, isRTL]);
+  }, [logicalTimeModes, timeMode, isRTL]);
+
+  const logicalSelectedTimeIndex = Math.max(
+    0,
+    logicalTimeModes.indexOf(timeMode)
+  );
 
   const directionOptions: { id: DankalDirection; label: string }[] = useMemo(
     () => [
@@ -1143,7 +1317,7 @@ export default function App() {
 
   return (
     <View style={styles.root}>
-      <StatusBar barStyle="light-content" />
+      <ExpoStatusBar style="light" />
 
       {/* 1. Full-Screen Native Apple Map (iOS) / Google Map (Android) */}
       <MapView
@@ -1205,6 +1379,7 @@ export default function App() {
                 latitude: rec.station.lat,
                 longitude: rec.station.lon,
               }}
+              tracksViewChanges={false}
               zIndex={isSelected ? 30 : isFastest ? 20 : 10}
               onPress={() => {
                 triggerHaptic('selection');
@@ -1243,18 +1418,21 @@ export default function App() {
           );
         })}
 
-        {/* User / Active Origin Marker */}
-        <Marker
-          coordinate={{
-            latitude: activeOrigin.lat,
-            longitude: activeOrigin.lon,
-          }}
-          title={isRTL ? activeOrigin.name_he : activeOrigin.name_en}
-        >
-          <View style={styles.userOriginPulseOuter}>
-            <View style={styles.userOriginDot} />
-          </View>
-        </Marker>
+        {/* User / Active Origin Marker (hide duplicate blue dot when GPS puck is already shown) */}
+        {!activeOrigin.isGps && (
+          <Marker
+            coordinate={{
+              latitude: activeOrigin.lat,
+              longitude: activeOrigin.lon,
+            }}
+            tracksViewChanges={false}
+            title={isRTL ? activeOrigin.name_he : activeOrigin.name_en}
+          >
+            <View style={styles.userOriginPulseOuter}>
+              <View style={styles.userOriginDot} />
+            </View>
+          </Marker>
+        )}
 
         {/* Live Tracked Bus / Rider Position Marker on Map */}
         {liveUserCoords && (
@@ -1263,6 +1441,7 @@ export default function App() {
               latitude: liveUserCoords.lat,
               longitude: liveUserCoords.lon,
             }}
+            tracksViewChanges={false}
           >
             <View style={styles.liveVehicleTrackerPin}>
               <Ionicons name="bus" size={14} color="#FFFFFF" />
@@ -1280,6 +1459,7 @@ export default function App() {
                     latitude: activeMapBusOption.originStopLat,
                     longitude: activeMapBusOption.originStopLon,
                   }}
+                  tracksViewChanges={false}
                   title={
                     isRTL
                       ? activeMapBusOption.originStopNameHe
@@ -1296,11 +1476,12 @@ export default function App() {
                     const isPassed = idx <= currentStopIndex;
                     return (
                       <Marker
-                        key={istop.stopId}
+                        key={`${istop.stopId}_${idx}`}
                         coordinate={{
                           latitude: istop.lat,
                           longitude: istop.lon,
                         }}
+                        tracksViewChanges={false}
                         anchor={{ x: 0.5, y: 0.5 }}
                       >
                         <View
@@ -1377,6 +1558,7 @@ export default function App() {
 
       {/* 2. Floating Top Card (iOS Liquid Glass / Android Material 3 Expressive) */}
       <SafeAreaView
+        edges={['top']}
         style={styles.topFloatingSafe}
         pointerEvents="box-none"
         onLayout={(e) => {
@@ -1485,18 +1667,22 @@ export default function App() {
           <View style={styles.segmentedWrapper}>
             {IS_ANDROID ? (
               <M3ExpressiveSegmentedControl
-                values={segmentedValues}
-                selectedIndex={segmentedSelectedIndex}
-                onSelect={handleTimeModeChange}
+                values={logicalTimeLabels}
+                selectedIndex={logicalSelectedTimeIndex}
+                isRTL={isRTL}
+                onSelect={(idx) => handleTimeModeChange(idx, true)}
               />
             ) : (
               <NativeSegmentedControl
-                values={segmentedValues}
-                selectedIndex={segmentedSelectedIndex}
+                values={iosSegmentedValues}
+                selectedIndex={iosSegmentedSelectedIndex}
                 onChange={(event: {
                   nativeEvent: { selectedSegmentIndex: number };
                 }) => {
-                  handleTimeModeChange(event.nativeEvent.selectedSegmentIndex);
+                  handleTimeModeChange(
+                    event.nativeEvent.selectedSegmentIndex,
+                    false
+                  );
                 }}
                 appearance="dark"
                 tintColor="#0A84FF"
@@ -1517,7 +1703,7 @@ export default function App() {
                 style={[styles.timePickerLabelGroup, { flexDirection: rowDir }]}
               >
                 <Ionicons name="calendar-outline" size={16} color="#64D2FF" />
-                <Text style={styles.timePickerLabel}>
+                <Text style={styles.timePickerLabel} numberOfLines={1}>
                   {timeMode === 'depart_at' ? t.modeDepartAt : t.modeArriveBy}:
                 </Text>
               </View>
@@ -1527,6 +1713,7 @@ export default function App() {
                   value={targetDate}
                   mode="datetime"
                   display="compact"
+                  locale={lang === 'he' ? 'he-IL' : 'en-GB'}
                   themeVariant="dark"
                   onChange={handleTimePickerChange}
                 />
@@ -1607,9 +1794,11 @@ export default function App() {
         style={[styles.bottomSheetContainer, { height: sheetHeightAnim }]}
       >
         <AdaptiveSurface intensity={75} tonalLevel="low" style={styles.bottomSheetGlass}>
-          {/* Draggable & Tappable Grabber Zone */}
-          <View {...panResponder.panHandlers} style={styles.grabberTouchArea}>
-            <View style={styles.sheetGrabber} />
+          {/* Draggable & Tappable Grabber Zone (Chevron kept outside PanResponder so Android taps never race!) */}
+          <View style={styles.grabberBarWrapper}>
+            <View {...panResponder.panHandlers} style={styles.grabberTouchArea}>
+              <View style={styles.sheetGrabber} />
+            </View>
             <TouchableOpacity
               style={styles.collapseChevronBtn}
               onPress={cycleSheetSnap}
@@ -1667,12 +1856,14 @@ export default function App() {
 
               <ScrollView
                 style={styles.cardsScroll}
-                contentContainerStyle={styles.cardsScrollContent}
+                contentContainerStyle={[
+                  styles.cardsScrollContent,
+                  { paddingBottom: 32 + insets.bottom },
+                ]}
                 showsVerticalScrollIndicator={false}
               >
-                {/* Clean Single-Line Full-Width Liquid Glass Live Tracking Pill */}
-                <TouchableOpacity
-                  activeOpacity={0.85}
+                {/* Clean Single-Line Full-Width Liquid Glass / M3 Expressive Live Tracking Pill */}
+                <AdaptivePressable
                   onPress={
                     isTrackingRide ? stopAllTracking : handleStartLiveTracking
                   }
@@ -1691,11 +1882,15 @@ export default function App() {
                     <Ionicons
                       name={isTrackingRide ? 'radio' : 'notifications'}
                       size={16}
-                      color="#FFFFFF"
+                      color={isTrackingRide ? THEME.onError : THEME.onPrimary}
                     />
                   </View>
                   <Text
-                    style={[styles.liveTrackingFullBtnText, { textAlign }]}
+                    style={[
+                      styles.liveTrackingFullBtnText,
+                      isTrackingRide && styles.liveTrackingFullBtnTextActive,
+                      { textAlign },
+                    ]}
                     numberOfLines={1}
                     adjustsFontSizeToFit
                   >
@@ -1703,7 +1898,7 @@ export default function App() {
                       ? t.stopLiveTrackingBtn
                       : t.startLiveTrackingBtn}
                   </Text>
-                </TouchableOpacity>
+                </AdaptivePressable>
 
                 {isTrackingRide && (
                   <View
@@ -2186,7 +2381,7 @@ export default function App() {
                       {selectedJourney.mode === 'scooter'
                         ? `🛴 ${t.scooterBike}`
                         : `🚶 ${t.walkDirect}`}{' '}
-                      ←{' '}
+                      {isRTL ? '←' : '→'}{' '}
                       {isRTL
                         ? selectedJourney.recommendation.station.name_he
                         : selectedJourney.recommendation.station.name_en}
@@ -2194,7 +2389,9 @@ export default function App() {
                     <Text style={[styles.timelineSubtitle, { textAlign }]}>
                       ~{selectedJourney.recommendation.walkMeters}
                       {t.metersUnit} • {t.arrivePlatformAt}
-                      {selectedJourney.recommendation.walkArriveFormatted}
+                      {selectedJourney.mode === 'scooter'
+                        ? selectedJourney.recommendation.scooterArriveFormatted
+                        : selectedJourney.recommendation.walkArriveFormatted}
                     </Text>
                     <TouchableOpacity
                       style={[
@@ -2208,7 +2405,9 @@ export default function App() {
                           isRTL
                             ? selectedJourney.recommendation.station.name_he
                             : selectedJourney.recommendation.station.name_en,
-                          'walking'
+                          selectedJourney.mode === 'scooter'
+                            ? 'bicycling'
+                            : 'walking'
                         )
                       }
                     >
@@ -2280,12 +2479,17 @@ export default function App() {
 
               <ScrollView
                 style={styles.cardsScroll}
-                contentContainerStyle={styles.cardsScrollContent}
+                contentContainerStyle={[
+                  styles.cardsScrollContent,
+                  { paddingBottom: 32 + insets.bottom },
+                ]}
                 showsVerticalScrollIndicator={false}
                 refreshControl={
                   <RefreshControl
                     refreshing={refreshing}
                     tintColor="#64D2FF"
+                    colors={[THEME.primary, THEME.tertiary]}
+                    progressBackgroundColor={THEME.surfaceContainerHigh}
                     onRefresh={() => {
                       triggerHaptic('light');
                       setRefreshing(true);
@@ -2674,19 +2878,12 @@ export default function App() {
                   );
                 })}
 
-                <Text style={styles.footerInfo}>
-                  {t.dataSourceFooter}
-                  {lastUpdatedMs > 0
-                    ? ` • ${
-                        secondsSinceUpdate < 5
-                          ? t.updatedJustNow
-                          : t.updatedSecondsAgo.replace(
-                              '{s}',
-                              String(secondsSinceUpdate)
-                            )
-                      }`
-                    : ''}
-                </Text>
+                <FooterSyncLabel
+                  footerBase={t.dataSourceFooter}
+                  lastUpdatedMs={lastUpdatedMs}
+                  updatedJustNow={t.updatedJustNow}
+                  updatedSecondsAgo={t.updatedSecondsAgo}
+                />
               </ScrollView>
             </View>
           )}
@@ -2697,10 +2894,21 @@ export default function App() {
       <Modal
         visible={showOriginSheet}
         animationType="slide"
+        statusBarTranslucent={IS_ANDROID}
         presentationStyle={IS_ANDROID ? 'fullScreen' : 'pageSheet'}
-        onRequestClose={() => setShowOriginSheet(false)}
+        onRequestClose={() => {
+          setShowOriginSheet(false);
+          setOriginSearchQuery('');
+        }}
       >
-        <SafeAreaView style={styles.modalContainer}>
+        <SafeAreaView
+          edges={['top', 'bottom']}
+          style={styles.modalContainer}
+        >
+          <KeyboardAvoidingView
+            style={{ flex: 1 }}
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          >
           <View style={[styles.modalHeader, { flexDirection: rowDir }]}>
             <Text style={styles.modalTitle}>{t.changeOrigin}</Text>
             <TouchableOpacity
@@ -2748,8 +2956,12 @@ export default function App() {
           </View>
 
           <ScrollView
-            contentContainerStyle={styles.modalContent}
+            contentContainerStyle={[
+              styles.modalContent,
+              { paddingBottom: 24 + insets.bottom },
+            ]}
             keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
           >
             {/* Current GPS Location Button */}
             <TouchableOpacity
@@ -3029,6 +3241,7 @@ export default function App() {
               </>
             )}
           </ScrollView>
+          </KeyboardAvoidingView>
         </SafeAreaView>
       </Modal>
     </View>
@@ -3114,8 +3327,8 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(6, 55, 40, 0.90)',
   },
   stationMapPinSelected: {
-    transform: [{ scale: 1.07 }],
     borderColor: '#64D2FF',
+    borderWidth: 2,
   },
   stationMapPinName: {
     color: '#FFFFFF',
@@ -3157,8 +3370,7 @@ const styles = StyleSheet.create({
     top: 0,
     left: 12,
     right: 12,
-    paddingTop:
-      Platform.OS === 'android' ? (StatusBar.currentHeight || 24) + 6 : 4,
+    paddingTop: 4,
     gap: 8,
   },
   topGlassCard: {
@@ -3344,6 +3556,10 @@ const styles = StyleSheet.create({
     borderTopRightRadius: THEME.sheetRadius,
     borderWidth: 1,
     borderColor: THEME.outline,
+  },
+  grabberBarWrapper: {
+    position: 'relative',
+    justifyContent: 'center',
   },
   grabberTouchArea: {
     paddingTop: IS_ANDROID ? 12 : 9,
@@ -3793,6 +4009,9 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '800',
   },
+  liveTrackingFullBtnTextActive: {
+    color: IS_ANDROID ? THEME.onErrorContainer : '#FFFFFF',
+  },
   trackingStatusStrip: {
     alignItems: 'center',
     gap: 8,
@@ -4008,7 +4227,6 @@ const styles = StyleSheet.create({
   modalContainer: {
     flex: 1,
     backgroundColor: IS_ANDROID ? THEME.surface : '#0A0E17',
-    paddingTop: IS_ANDROID ? (StatusBar.currentHeight || 24) : 0,
   },
   modalHeader: {
     paddingHorizontal: 18,

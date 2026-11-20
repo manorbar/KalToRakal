@@ -6,11 +6,10 @@ export const IS_IOS = Platform.OS === 'ios';
 /**
  * Dual-platform design tokens:
  * - iOS: Apple iOS 26 Liquid Glass vibrancy palette
- * - Android: Material 3 Expressive Dark tonal surface system (surfaceContainer levels + expressive primary/tertiary containers)
+ * - Android: Material 3 Expressive Dark tonal surface system
  */
 export const THEME = IS_ANDROID
   ? {
-      // Material 3 Expressive Dark Tonal Surfaces
       surface: '#111318',
       surfaceContainerLow: '#191C22',
       surfaceContainer: '#1D2028',
@@ -19,7 +18,6 @@ export const THEME = IS_ANDROID
       outline: '#434754',
       outlineVariant: 'rgba(142, 144, 153, 0.28)',
 
-      // M3 Expressive Accent Roles
       primary: '#A8C7FA',
       onPrimary: '#062E6F',
       primaryContainer: '#0842A0',
@@ -29,10 +27,12 @@ export const THEME = IS_ANDROID
       onSecondaryContainer: '#D3E4FF',
 
       tertiary: '#6DD58C',
+      onTertiary: '#003915',
       tertiaryContainer: '#0F5223',
       onTertiaryContainer: '#C4EED0',
 
       error: '#FFB4AB',
+      onError: '#690005',
       errorContainer: '#93000A',
       onErrorContainer: '#FFDAD6',
       redLine: '#E53935',
@@ -42,14 +42,12 @@ export const THEME = IS_ANDROID
 
       rippleColor: 'rgba(168, 199, 250, 0.24)',
 
-      // Expressive Shape Radii (M3 Expressive uses generous 28dp sheets, 24dp cards, full pills)
       cardRadius: 24,
       innerCardRadius: 18,
       pillRadius: 999,
       sheetRadius: 28,
     }
   : {
-      // iOS Liquid Glass Palette
       surface: '#000000',
       surfaceContainerLow: 'rgba(18, 22, 32, 0.34)',
       surfaceContainer: 'rgba(255, 255, 255, 0.06)',
@@ -67,10 +65,12 @@ export const THEME = IS_ANDROID
       onSecondaryContainer: '#E2E8F0',
 
       tertiary: '#30D158',
+      onTertiary: '#FFFFFF',
       tertiaryContainer: 'rgba(48, 209, 88, 0.20)',
       onTertiaryContainer: '#30D158',
 
       error: '#FF453A',
+      onError: '#FFFFFF',
       errorContainer: 'rgba(255, 69, 58, 0.25)',
       onErrorContainer: '#FCA5A5',
       redLine: '#FF453A',

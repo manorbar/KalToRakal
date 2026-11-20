@@ -1,8 +1,5 @@
-import rawData from '../data/dankal_data.json';
 import * as Location from 'expo-location';
-import { DankalDataset } from '../types/transit';
-
-const dataset = rawData as unknown as DankalDataset;
+import { getActiveDataset } from './routingEngine';
 
 export interface OriginSearchResult {
   id: string;
@@ -15,7 +12,6 @@ export interface OriginSearchResult {
   kind: 'stop' | 'address';
 }
 
-// Pre-build a lightweight array of all 4,225 Gush Dan bus stops once for instant (<5ms) offline search
 interface IndexedStop {
   stopId: string;
   code: string;
@@ -27,21 +23,29 @@ interface IndexedStop {
   lon: number;
 }
 
-const INDEXED_STOPS: IndexedStop[] = Object.entries(dataset.stops).map(
-  ([stopId, s]) => ({
-    stopId,
-    code: s.c,
-    he: s.he,
-    en: s.en,
-    heLower: s.he.toLowerCase(),
-    enLower: s.en.toLowerCase(),
-    lat: s.lat,
-    lon: s.lon,
-  })
-);
+let cachedDatasetVersion = '';
+let indexedStopsCache: IndexedStop[] = [];
+
+function getIndexedStops(): IndexedStop[] {
+  const ds = getActiveDataset();
+  if (ds.generated_at !== cachedDatasetVersion || indexedStopsCache.length === 0) {
+    cachedDatasetVersion = ds.generated_at;
+    indexedStopsCache = Object.entries(ds.stops).map(([stopId, s]) => ({
+      stopId,
+      code: s.c,
+      he: s.he,
+      en: s.en,
+      heLower: s.he.toLowerCase(),
+      enLower: s.en.toLowerCase(),
+      lat: s.lat,
+      lon: s.lon,
+    }));
+  }
+  return indexedStopsCache;
+}
 
 /**
- * Instant offline search across all 4,225 Gush Dan bus stops by Hebrew/English name or 5-digit stop code.
+ * Instant offline search across all 4,225+ Gush Dan bus stops (always synced with active GTFS dataset).
  */
 export function searchLocalBusStops(
   query: string,
@@ -54,14 +58,13 @@ export function searchLocalBusStops(
   const results: OriginSearchResult[] = [];
   const seenNames = new Set<string>();
 
-  for (const s of INDEXED_STOPS) {
+  for (const s of getIndexedStops()) {
     const codeMatch = s.code.startsWith(q);
     const nameMatch = tokens.every(
       (tok) => s.heLower.includes(tok) || s.enLower.includes(tok)
     );
 
     if (codeMatch || nameMatch) {
-      // Avoid cluttering results with opposite-side stops of the exact same name unless searching by code
       const dedupKey = codeMatch ? s.code : s.he;
       if (seenNames.has(dedupKey)) continue;
       seenNames.add(dedupKey);
@@ -86,7 +89,7 @@ export function searchLocalBusStops(
 
 interface PhotonFeature {
   geometry?: {
-    coordinates?: [number, number]; // [lon, lat]
+    coordinates?: [number, number];
   };
   properties?: {
     name?: string;
@@ -94,7 +97,6 @@ interface PhotonFeature {
     housenumber?: string;
     city?: string;
     district?: string;
-    countrycode?: string;
   };
 }
 
@@ -113,10 +115,9 @@ export async function searchAddressesAndPlaces(
   const results: OriginSearchResult[] = [];
   const seenKeys = new Set<string>();
 
-  // 1. Query Photon (free OSM geocoder biased to Central Israel / Gush Dan)
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4500);
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 4500);
     const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(
       q
     )}&lat=32.075&lon=34.805&limit=10&bbox=34.68,31.93,34.98,32.22`;
@@ -125,7 +126,6 @@ export async function searchAddressesAndPlaces(
       headers: { Accept: 'application/json' },
       signal: controller.signal,
     });
-    clearTimeout(timer);
 
     if (resp.ok) {
       const data = await resp.json();
@@ -139,7 +139,6 @@ export async function searchAddressesAndPlaces(
         if (!coords || coords.length < 2 || !props) continue;
 
         const [lon, lat] = coords;
-        // Double-check within broader Central Israel
         if (lat < 31.9 || lat > 32.25 || lon < 34.65 || lon > 35.0) continue;
 
         const streetPart = props.street
@@ -175,9 +174,10 @@ export async function searchAddressesAndPlaces(
     }
   } catch {
     // Fall through to native OS geocoder
+  } finally {
+    clearTimeout(timer);
   }
 
-  // 2. If Photon returned nothing, try native Apple/Google geocoder (`Location.geocodeAsync`)
   if (results.length === 0) {
     try {
       const withRegion =
