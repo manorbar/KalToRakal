@@ -290,8 +290,11 @@ export default function App() {
     [timeMode, targetDate]
   );
 
-  const allStations = useMemo(() => getAllStations(), []);
-  const { r1Coords, r2BranchCoords } = useMemo(() => getRedLinePolylines(), []);
+  const allStations = useMemo(() => getAllStations(), [lastUpdatedMs]);
+  const { r1Coords, r2BranchCoords } = useMemo(
+    () => getRedLinePolylines(),
+    [lastUpdatedMs]
+  );
 
   const triggerHaptic = (
     type: 'selection' | 'light' | 'success' | 'warning' | 'error' = 'selection'
@@ -319,7 +322,10 @@ export default function App() {
             body,
             sound: true,
           },
-          trigger: null,
+          trigger:
+            Platform.OS === 'android'
+              ? { channelId: 'get-off-alerts' }
+              : null,
         });
       } catch {
         // Fallback if notifications permission wasn't granted
@@ -465,6 +471,14 @@ export default function App() {
     triggerHaptic('light');
 
     try {
+      if (Platform.OS === 'android') {
+        await Notifications.setNotificationChannelAsync('get-off-alerts', {
+          name: 'Get-Off Alerts (התראות ירידה)',
+          importance: Notifications.AndroidImportance.MAX,
+          vibrationPattern: [0, 500, 200, 500],
+          lightColor: '#FF453A',
+        });
+      }
       await Notifications.requestPermissionsAsync();
     } catch {
       // ignore
@@ -939,7 +953,23 @@ export default function App() {
     }
     if (event.type === 'set' && selected) {
       triggerHaptic('selection');
-      setTargetDate(selected);
+      if (Platform.OS === 'android') {
+        setTargetDate((prev) => {
+          const merged = new Date(prev.getTime());
+          if (androidPickerMode === 'date') {
+            merged.setFullYear(
+              selected.getFullYear(),
+              selected.getMonth(),
+              selected.getDate()
+            );
+          } else {
+            merged.setHours(selected.getHours(), selected.getMinutes(), 0, 0);
+          }
+          return merged;
+        });
+      } else {
+        setTargetDate(selected);
+      }
     }
   };
 
@@ -2663,14 +2693,14 @@ export default function App() {
         </AdaptiveSurface>
       </Animated.View>
 
-      {/* 4. Native iOS PageSheet Modal for Picking Origin (Current GPS + Free Search + Presets) */}
+      {/* 4. Native iOS PageSheet / Android Material Modal for Picking Origin */}
       <Modal
         visible={showOriginSheet}
         animationType="slide"
-        presentationStyle="pageSheet"
+        presentationStyle={IS_ANDROID ? 'fullScreen' : 'pageSheet'}
         onRequestClose={() => setShowOriginSheet(false)}
       >
-        <View style={styles.modalContainer}>
+        <SafeAreaView style={styles.modalContainer}>
           <View style={[styles.modalHeader, { flexDirection: rowDir }]}>
             <Text style={styles.modalTitle}>{t.changeOrigin}</Text>
             <TouchableOpacity
@@ -2999,7 +3029,7 @@ export default function App() {
               </>
             )}
           </ScrollView>
-        </View>
+        </SafeAreaView>
       </Modal>
     </View>
   );
@@ -3978,6 +4008,7 @@ const styles = StyleSheet.create({
   modalContainer: {
     flex: 1,
     backgroundColor: IS_ANDROID ? THEME.surface : '#0A0E17',
+    paddingTop: IS_ANDROID ? (StatusBar.currentHeight || 24) : 0,
   },
   modalHeader: {
     paddingHorizontal: 18,
