@@ -120,11 +120,49 @@ function FooterSyncLabel({
   );
 }
 
+class AppErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean; message: string }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, message: '' };
+  }
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, message: error?.message || String(error) };
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <View
+          style={{
+            flex: 1,
+            backgroundColor: '#111318',
+            justifyContent: 'center',
+            alignItems: 'center',
+            padding: 24,
+          }}
+        >
+          <Text style={{ color: '#FFB4AB', fontSize: 18, fontWeight: '800', marginBottom: 8 }}>
+            KalToRakal Error
+          </Text>
+          <Text style={{ color: '#E2E2E9', fontSize: 13, textAlign: 'center' }}>
+            {this.state.message}
+          </Text>
+        </View>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function App() {
   return (
-    <SafeAreaProvider>
-      <MainApp />
-    </SafeAreaProvider>
+    <AppErrorBoundary>
+      <SafeAreaProvider>
+        <MainApp />
+      </SafeAreaProvider>
+    </AppErrorBoundary>
   );
 }
 
