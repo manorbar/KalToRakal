@@ -544,11 +544,20 @@ export async function computeRoutesToNearestDankalStations(
     }
 
     if (timeMode === 'arrive_by') {
-      liveBusOptions.sort((a, b) =>
-        b.leaveHomeFormatted.localeCompare(a.leaveHomeFormatted)
-      );
+      liveBusOptions.sort((a, b) => {
+        const leaveCmp = b.leaveHomeFormatted.localeCompare(
+          a.leaveHomeFormatted
+        );
+        if (leaveCmp !== 0) return leaveCmp;
+        return a.intermediateStops.length - b.intermediateStops.length;
+      });
     } else {
-      liveBusOptions.sort((a, b) => a.totalMinutes - b.totalMinutes);
+      liveBusOptions.sort((a, b) => {
+        if (a.totalMinutes !== b.totalMinutes) {
+          return a.totalMinutes - b.totalMinutes;
+        }
+        return a.intermediateStops.length - b.intermediateStops.length;
+      });
     }
 
     for (let i = 0; i < liveBusOptions.length - 1; i++) {

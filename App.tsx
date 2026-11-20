@@ -581,9 +581,20 @@ export default function App() {
         );
         setRecommendations(res);
         if (res.length > 0) {
-          const fastest = res.reduce((best, cur) =>
-            cur.bestTotalMinutes < best.bestTotalMinutes ? cur : best
-          );
+          const fastest = [...res].sort((a, b) => {
+            if (a.bestTotalMinutes !== b.bestTotalMinutes) {
+              return a.bestTotalMinutes - b.bestTotalMinutes;
+            }
+            const aStops =
+              a.bestMode === 'bus' && a.liveBusOptions.length > 0
+                ? a.liveBusOptions[0].intermediateStops.length
+                : 0;
+            const bStops =
+              b.bestMode === 'bus' && b.liveBusOptions.length > 0
+                ? b.liveBusOptions[0].intermediateStops.length
+                : 0;
+            return aStops - bStops;
+          })[0];
           setSelectedStationId(fastest.station.id);
           fitMapToStations(lat, lon, res);
         }
@@ -914,18 +925,37 @@ export default function App() {
     };
   };
 
+  const compareStationRecs = useCallback(
+    (a: StationRecommendation, b: StationRecommendation) => {
+      if (a.bestTotalMinutes !== b.bestTotalMinutes) {
+        return a.bestTotalMinutes - b.bestTotalMinutes;
+      }
+      const aStops =
+        a.bestMode === 'bus' && a.liveBusOptions.length > 0
+          ? a.liveBusOptions[0].intermediateStops.length
+          : 0;
+      const bStops =
+        b.bestMode === 'bus' && b.liveBusOptions.length > 0
+          ? b.liveBusOptions[0].intermediateStops.length
+          : 0;
+      if (aStops !== bStops) {
+        return aStops - bStops;
+      }
+      return a.aerialMeters - b.aerialMeters;
+    },
+    []
+  );
+
   const sortedRecommendations = useMemo(() => {
     const copy = [...recommendations];
-    copy.sort((a, b) => a.bestTotalMinutes - b.bestTotalMinutes);
+    copy.sort(compareStationRecs);
     return copy;
-  }, [recommendations]);
+  }, [recommendations, compareStationRecs]);
 
   const overallFastestStationId = useMemo(() => {
-    if (recommendations.length === 0) return null;
-    return recommendations.reduce((best, cur) =>
-      cur.bestTotalMinutes < best.bestTotalMinutes ? cur : best
-    ).station.id;
-  }, [recommendations]);
+    if (sortedRecommendations.length === 0) return null;
+    return sortedRecommendations[0].station.id;
+  }, [sortedRecommendations]);
 
   const selectedStationRec = useMemo(
     () =>
