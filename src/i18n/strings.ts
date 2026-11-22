@@ -102,6 +102,18 @@ export interface Translations {
   saveCurrentAsWork: string;
   updatedSecondsAgo: string;
   updatedJustNow: string;
+  startInAppWalkNav: string;
+  stopWalkNav: string;
+  walkNavActive: string;
+  walkNavNextTurnIn: string;
+  walkNavThen: string;
+  walkNavRecenter: string;
+  walkNavExternalMaps: string;
+  walkNavLoading: string;
+  walkNavArrived: string;
+  walkNavShowSteps: string;
+  walkNavHideSteps: string;
+  walkNavRecalculating: string;
 }
 
 export const STRINGS: Record<Language, Translations> = {
@@ -207,6 +219,18 @@ export const STRINGS: Record<Language, Translations> = {
     saveCurrentAsWork: 'שמור מוצא נוכחי כעבודה',
     updatedSecondsAgo: 'עודכן לפני {s} שנ\'',
     updatedJustNow: 'עודכן עכשיו',
+    startInAppWalkNav: 'נווט בהליכה באפליקציה',
+    stopWalkNav: 'סיים ניווט',
+    walkNavActive: 'ניווט הליכה פעיל',
+    walkNavNextTurnIn: 'בעוד {m} מ\'',
+    walkNavThen: 'אח״כ:',
+    walkNavRecenter: 'מרכז',
+    walkNavExternalMaps: 'מפות',
+    walkNavLoading: 'טוען מסלול הליכה...',
+    walkNavArrived: 'הגעת ליעד!',
+    walkNavShowSteps: 'הצג {s} שלבי הליכה',
+    walkNavHideSteps: 'הסתר שלבי הליכה',
+    walkNavRecalculating: 'מחשב מסלול מחדש...',
   },
   en: {
     appTitle: 'KalToRakal',
@@ -310,6 +334,18 @@ export const STRINGS: Record<Language, Translations> = {
     saveCurrentAsWork: 'Save current as Work',
     updatedSecondsAgo: 'Updated {s}s ago',
     updatedJustNow: 'Updated just now',
+    startInAppWalkNav: 'Walk Navigation Here',
+    stopWalkNav: 'End Nav',
+    walkNavActive: 'Walking Navigation Active',
+    walkNavNextTurnIn: 'In {m}m',
+    walkNavThen: 'Then:',
+    walkNavRecenter: 'Recenter',
+    walkNavExternalMaps: 'Maps',
+    walkNavLoading: 'Loading walking route...',
+    walkNavArrived: 'You have arrived!',
+    walkNavShowSteps: 'Show {s} walking steps',
+    walkNavHideSteps: 'Hide walking steps',
+    walkNavRecalculating: 'Recalculating route...',
   },
 };
 

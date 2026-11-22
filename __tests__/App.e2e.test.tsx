@@ -13,6 +13,7 @@ jest.mock('react-native-maps', () => {
     React.useImperativeHandle(ref, () => ({
       animateToRegion: mockAnimateToRegion,
       animateCamera: jest.fn(),
+      fitToCoordinates: jest.fn(),
     }));
     return <View testID="mock-map-view" {...props}>{props.children}</View>;
   });
@@ -105,6 +106,9 @@ jest.mock('expo-location', () => ({
   getCurrentPositionAsync: jest.fn(async () => ({
     coords: { latitude: 32.0754, longitude: 34.7749 },
   })),
+  getLastKnownPositionAsync: jest.fn(async () => ({
+    coords: { latitude: 32.0754, longitude: 34.7749 },
+  })),
   reverseGeocodeAsync: jest.fn(async () => [
     { street: 'דיזנגוף', streetNumber: '50', city: 'תל אביב' },
   ]),
@@ -113,7 +117,8 @@ jest.mock('expo-location', () => ({
     mockLocationCallback = cb;
     return { remove: mockRemoveWatch };
   }),
-  Accuracy: { Balanced: 3, High: 4 },
+  watchHeadingAsync: jest.fn(async () => ({ remove: jest.fn() })),
+  Accuracy: { Balanced: 3, High: 4, BestForNavigation: 6 },
 }));
 
 jest.mock('expo-notifications', () => ({
@@ -325,5 +330,139 @@ describe('KalToRakal Real-World End-to-End Interaction Tests', () => {
       'any'
     );
     expect(lateRecs.length).toBe(3);
+  });
+
+  test('6. In-App Walking Navigation parses OSRM turn-by-turn steps, falls back cleanly, and renders live HUD', async () => {
+    const {
+      fetchWalkingRoute,
+      computeWalkingProgress,
+      clearWalkingRouteCache,
+    } = require('../src/services/walkingNavigation');
+
+    clearWalkingRouteCache();
+    mockFetch.mockReset();
+    mockFetch.mockImplementation(async (url: string) => {
+      if (url.includes('raw.githubusercontent.com')) {
+        return { ok: false, json: async () => ({}) };
+      }
+      return { ok: true, json: async () => ({ visits: {} }) };
+    });
+
+    // 1. OSRM GeoJSON + bilingual turn-by-turn step parsing
+    mockFetch.mockImplementationOnce(async () => ({
+      ok: true,
+      json: async () => ({
+        routes: [
+          {
+            distance: 420,
+            duration: 315,
+            geometry: {
+              coordinates: [
+                [34.7749, 32.0754],
+                [34.7765, 32.0754],
+                [34.7765, 32.0732],
+              ],
+            },
+            legs: [
+              {
+                steps: [
+                  {
+                    name: 'דיזנגוף',
+                    distance: 160,
+                    duration: 120,
+                    maneuver: { type: 'depart', location: [34.7749, 32.0754] },
+                  },
+                  {
+                    name: 'המלך ג׳ורג׳',
+                    distance: 260,
+                    duration: 195,
+                    maneuver: {
+                      type: 'turn',
+                      modifier: 'right',
+                      location: [34.7765, 32.0754],
+                    },
+                  },
+                  {
+                    name: '',
+                    distance: 0,
+                    duration: 0,
+                    maneuver: { type: 'arrive', location: [34.7765, 32.0732] },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    }));
+
+    const route = await fetchWalkingRoute(
+      32.0754,
+      34.7749,
+      32.0732,
+      34.7765,
+      'תחנת קרליבך',
+      'Carlebach Station'
+    );
+    expect(route.source).toBe('osrm');
+    expect(route.coordinates.length).toBe(3);
+    expect(route.steps.length).toBe(3);
+    expect(route.steps[1].instructionHe).toContain('פנה ימינה');
+    expect(route.steps[1].instructionEn).toContain('Turn right');
+
+    // 2. Progress advances to step 1 when reaching the turn point, and arrives near destination
+    const atTurn = computeWalkingProgress(32.0754, 34.7765, route, 0);
+    expect(atTurn.activeStepIndex).toBe(1);
+    expect(atTurn.arrived).toBe(false);
+
+    const atDest = computeWalkingProgress(32.0732, 34.7765, route, 1);
+    expect(atDest.arrived).toBe(true);
+    expect(atDest.activeStepIndex).toBe(2);
+
+    // 3. Offline fallback never throws
+    clearWalkingRouteCache();
+    mockFetch.mockImplementationOnce(async () => {
+      throw new Error('Network down');
+    });
+    const fallbackRoute = await fetchWalkingRoute(
+      32.0754,
+      34.7749,
+      32.0732,
+      34.7765,
+      'תחנת קרליבך',
+      'Carlebach Station'
+    );
+    expect(fallbackRoute.source).toBe('fallback');
+    expect(fallbackRoute.steps.length).toBe(2);
+
+    // 4. Mounted App: open Direct Walk Travel Screen, start In-App Walking Navigation, see HUD, stop nav
+    (Location.requestForegroundPermissionsAsync as jest.Mock).mockResolvedValue({
+      status: 'granted',
+    });
+    (Location.getCurrentPositionAsync as jest.Mock).mockResolvedValue({
+      coords: { latitude: 32.0754, longitude: 34.7749 },
+    });
+
+    await render(<App />);
+    await waitFor(() => {
+      expect(screen.getByText(/דיזנגוף 50, תל אביב/)).toBeTruthy();
+    });
+
+    const walkBtns = await waitFor(() => screen.getAllByText(/הליכה ישירה:/));
+    await fireEvent.press(walkBtns[0]);
+
+    const startWalkBtn = await waitFor(() =>
+      screen.getByText('נווט בהליכה באפליקציה')
+    );
+    await fireEvent.press(startWalkBtn);
+
+    await waitFor(() => {
+      expect(screen.getAllByText('סיים ניווט').length).toBeGreaterThan(0);
+    });
+
+    await fireEvent.press(screen.getAllByText('סיים ניווט')[0]);
+    await waitFor(() => {
+      expect(mockRemoveWatch).toHaveBeenCalled();
+    });
   });
 });

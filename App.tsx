@@ -67,6 +67,12 @@ import {
   searchAddressesAndPlaces,
   searchLocalBusStops,
 } from './src/services/originSearch';
+import {
+  WalkingRoute,
+  WalkingProgress,
+  fetchWalkingRoute,
+  computeWalkingProgress,
+} from './src/services/walkingNavigation';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -200,6 +206,35 @@ function MainApp() {
     useState<SelectedJourney | null>(null);
   const [showIntermediateStops, setShowIntermediateStops] =
     useState<boolean>(true);
+  const [showWalkSteps, setShowWalkSteps] = useState<boolean>(false);
+
+  // In-App Walking Navigation State (100% Free OSM Pedestrian Routing)
+  const [walkToBusRoute, setWalkToBusRoute] = useState<WalkingRoute | null>(
+    null
+  );
+  const [walkFromBusRoute, setWalkFromBusRoute] = useState<WalkingRoute | null>(
+    null
+  );
+  const [loadingWalkRoutes, setLoadingWalkRoutes] = useState<boolean>(false);
+  const [activeWalkNav, setActiveWalkNav] = useState<{
+    leg: 'to_bus' | 'from_bus' | 'direct';
+    destLat: number;
+    destLon: number;
+    destNameHe: string;
+    destNameEn: string;
+    route: WalkingRoute;
+    progress: WalkingProgress;
+    followUser: boolean;
+    recalculating: boolean;
+  } | null>(null);
+  const [userHeading, setUserHeading] = useState<number | null>(null);
+
+  const walkLocSubRef = useRef<Location.LocationSubscription | null>(null);
+  const walkHeadingSubRef = useRef<Location.LocationSubscription | null>(null);
+  const walkNavSessionRef = useRef<number>(0);
+  const walkRecalcTimeRef = useRef<number>(0);
+  const activeWalkNavRef = useRef(activeWalkNav);
+  activeWalkNavRef.current = activeWalkNav;
 
   // Live Route Progress & Get-Off Alert State
   const [isTrackingRide, setIsTrackingRide] = useState<boolean>(false);
@@ -443,12 +478,27 @@ function MainApp() {
     []
   );
 
+  const stopWalkNav = useCallback(() => {
+    walkNavSessionRef.current += 1;
+    if (walkLocSubRef.current) {
+      walkLocSubRef.current.remove();
+      walkLocSubRef.current = null;
+    }
+    if (walkHeadingSubRef.current) {
+      walkHeadingSubRef.current.remove();
+      walkHeadingSubRef.current = null;
+    }
+    setActiveWalkNav(null);
+    setUserHeading(null);
+  }, []);
+
   const stopAllTracking = useCallback(() => {
     trackingSessionIdRef.current += 1;
     if (locationSubRef.current) {
       locationSubRef.current.remove();
       locationSubRef.current = null;
     }
+    stopWalkNav();
     setIsTrackingRide(false);
     setLiveUserCoords(null);
     setCurrentStopIndex(-1);
@@ -458,7 +508,270 @@ function MainApp() {
       getOffFired: false,
       doneFired: false,
     };
-  }, []);
+  }, [stopWalkNav]);
+
+  // Automatically fetch street-following OSM walking polylines when a journey is opened
+  useEffect(() => {
+    if (!selectedJourney) {
+      setWalkToBusRoute(null);
+      setWalkFromBusRoute(null);
+      setLoadingWalkRoutes(false);
+      setShowWalkSteps(false);
+      stopWalkNav();
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingWalkRoutes(true);
+
+    (async () => {
+      try {
+        const rec = selectedJourney.recommendation;
+        if (selectedJourney.mode === 'bus' && selectedJourney.busOption) {
+          const bus = selectedJourney.busOption;
+          const [toBus, fromBus] = await Promise.all([
+            fetchWalkingRoute(
+              activeOrigin.lat,
+              activeOrigin.lon,
+              bus.originStopLat,
+              bus.originStopLon,
+              bus.originStopNameHe,
+              bus.originStopNameEn
+            ),
+            fetchWalkingRoute(
+              bus.alightStopLat,
+              bus.alightStopLon,
+              rec.station.lat,
+              rec.station.lon,
+              rec.station.name_he,
+              rec.station.name_en
+            ),
+          ]);
+          if (!cancelled) {
+            setWalkToBusRoute(toBus);
+            setWalkFromBusRoute(fromBus);
+          }
+        } else {
+          const direct = await fetchWalkingRoute(
+            activeOrigin.lat,
+            activeOrigin.lon,
+            rec.station.lat,
+            rec.station.lon,
+            rec.station.name_he,
+            rec.station.name_en
+          );
+          if (!cancelled) {
+            setWalkToBusRoute(direct);
+            setWalkFromBusRoute(null);
+          }
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingWalkRoutes(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedJourney, activeOrigin.lat, activeOrigin.lon, stopWalkNav]);
+
+  const startInAppWalkNav = useCallback(
+    async (
+      leg: 'to_bus' | 'from_bus' | 'direct',
+      startLat: number,
+      startLon: number,
+      destLat: number,
+      destLon: number,
+      destNameHe: string,
+      destNameEn: string,
+      preloadedRoute?: WalkingRoute | null
+    ) => {
+      stopWalkNav();
+      const sessionId = walkNavSessionRef.current;
+      triggerHaptic('light');
+      snapSheetTo('collapsed');
+
+      let initialLat = startLat;
+      let initialLon = startLon;
+      let gpsGranted = false;
+
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (sessionId !== walkNavSessionRef.current) return;
+        gpsGranted = status === 'granted';
+        if (gpsGranted && leg !== 'from_bus') {
+          const last = await Location.getLastKnownPositionAsync();
+          if (last && sessionId === walkNavSessionRef.current) {
+            const distFromOrigin = haversineMeters(
+              last.coords.latitude,
+              last.coords.longitude,
+              startLat,
+              startLon
+            );
+            if (distFromOrigin < 250) {
+              initialLat = last.coords.latitude;
+              initialLon = last.coords.longitude;
+            }
+          }
+        }
+      } catch {
+        // Continue with planned start coordinates if GPS unavailable
+      }
+
+      const route =
+        preloadedRoute && preloadedRoute.coordinates.length >= 2
+          ? preloadedRoute
+          : await fetchWalkingRoute(
+              initialLat,
+              initialLon,
+              destLat,
+              destLon,
+              destNameHe,
+              destNameEn
+            );
+
+      if (sessionId !== walkNavSessionRef.current) return;
+
+      const initialProgress = computeWalkingProgress(
+        initialLat,
+        initialLon,
+        route,
+        0
+      );
+
+      setActiveWalkNav({
+        leg,
+        destLat,
+        destLon,
+        destNameHe,
+        destNameEn,
+        route,
+        progress: initialProgress,
+        followUser: true,
+        recalculating: false,
+      });
+
+      if (mapRef.current) {
+        mapRef.current.fitToCoordinates(route.coordinates, {
+          edgePadding: {
+            top: Math.max(190, topOverlayBottomY + 24),
+            right: 48,
+            bottom: sheetCollapsedHeight + 48,
+            left: 48,
+          },
+          animated: true,
+        });
+      }
+
+      if (!gpsGranted) return;
+
+      try {
+        const sub = await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.BestForNavigation,
+            timeInterval: 2500,
+            distanceInterval: 4,
+          },
+          async (pos) => {
+            if (sessionId !== walkNavSessionRef.current) return;
+            const current = activeWalkNavRef.current;
+            if (!current) return;
+
+            const { latitude: lat, longitude: lon } = pos.coords;
+            setLiveUserCoords({ lat, lon });
+
+            const nextProg = computeWalkingProgress(
+              lat,
+              lon,
+              current.route,
+              current.progress.activeStepIndex
+            );
+
+            if (nextProg.activeStepIndex > current.progress.activeStepIndex) {
+              triggerHaptic('selection');
+            }
+            if (nextProg.arrived && !current.progress.arrived) {
+              triggerHaptic('success');
+            }
+
+            setActiveWalkNav((prev) =>
+              prev ? { ...prev, progress: nextProg } : null
+            );
+
+            if (current.followUser && mapRef.current) {
+              mapRef.current.animateToRegion(
+                {
+                  latitude: lat,
+                  longitude: lon,
+                  latitudeDelta: 0.0038,
+                  longitudeDelta: 0.0038,
+                },
+                500
+              );
+            }
+
+            if (
+              nextProg.offRoute &&
+              Date.now() - walkRecalcTimeRef.current > 15000
+            ) {
+              walkRecalcTimeRef.current = Date.now();
+              setActiveWalkNav((prev) =>
+                prev ? { ...prev, recalculating: true } : null
+              );
+              const newRoute = await fetchWalkingRoute(
+                lat,
+                lon,
+                current.destLat,
+                current.destLon,
+                current.destNameHe,
+                current.destNameEn,
+                true
+              );
+              if (sessionId !== walkNavSessionRef.current) return;
+              const freshProg = computeWalkingProgress(lat, lon, newRoute, 0);
+              setActiveWalkNav((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      route: newRoute,
+                      progress: freshProg,
+                      recalculating: false,
+                    }
+                  : null
+              );
+            }
+          }
+        );
+        if (sessionId !== walkNavSessionRef.current) {
+          sub.remove();
+          return;
+        }
+        walkLocSubRef.current = sub;
+      } catch {
+        // Ignore watchPosition failure on simulators
+      }
+
+      try {
+        const headingSub = await Location.watchHeadingAsync((h) => {
+          if (sessionId !== walkNavSessionRef.current) return;
+          const deg = h.trueHeading >= 0 ? h.trueHeading : h.magHeading;
+          if (Number.isFinite(deg)) {
+            setUserHeading(deg);
+          }
+        });
+        if (sessionId !== walkNavSessionRef.current) {
+          headingSub.remove();
+          return;
+        }
+        walkHeadingSubRef.current = headingSub;
+      } catch {
+        // Compass unavailable on simulator
+      }
+    },
+    [stopWalkNav, snapSheetTo, topOverlayBottomY, sheetCollapsedHeight]
+  );
 
   useEffect(() => {
     return () => {
@@ -466,10 +779,14 @@ function MainApp() {
     };
   }, [stopAllTracking]);
 
-  // Android Hardware Back Button handler: close Active Journey or collapse expanded sheet instead of exiting app
+  // Android Hardware Back Button handler: stop walk nav, close Active Journey, or collapse expanded sheet instead of exiting app
   useEffect(() => {
     if (!IS_ANDROID) return;
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (activeWalkNav) {
+        stopWalkNav();
+        return true;
+      }
       if (selectedJourney) {
         stopAllTracking();
         setSelectedJourney(null);
@@ -482,7 +799,14 @@ function MainApp() {
       return false;
     });
     return () => sub.remove();
-  }, [selectedJourney, sheetSnap, stopAllTracking, snapSheetTo]);
+  }, [
+    activeWalkNav,
+    stopWalkNav,
+    selectedJourney,
+    sheetSnap,
+    stopAllTracking,
+    snapSheetTo,
+  ]);
 
   const evaluateRouteProgress = useCallback(
     (lat: number, lon: number, journey: SelectedJourney) => {
@@ -1366,6 +1690,13 @@ function MainApp() {
         showsCompass={false}
         showsScale={false}
         onLongPress={handleMapLongPress}
+        onPanDrag={() => {
+          if (activeWalkNavRef.current?.followUser) {
+            setActiveWalkNav((prev) =>
+              prev ? { ...prev, followUser: false } : null
+            );
+          }
+        }}
         initialRegion={{
           latitude: activeOrigin.lat - 0.008,
           longitude: activeOrigin.lon,
@@ -1472,19 +1803,71 @@ function MainApp() {
           </Marker>
         )}
 
-        {/* Live Tracked Bus / Rider Position Marker on Map */}
+        {/* Live Tracked Bus / Walker Position Marker on Map */}
         {liveUserCoords && (
           <Marker
             coordinate={{
               latitude: liveUserCoords.lat,
               longitude: liveUserCoords.lon,
             }}
+            anchor={{ x: 0.5, y: 0.5 }}
             tracksViewChanges={false}
+            zIndex={60}
           >
-            <View style={styles.liveVehicleTrackerPin}>
-              <Ionicons name="bus" size={14} color="#FFFFFF" />
+            <View
+              style={[
+                styles.liveVehicleTrackerPin,
+                activeWalkNav && styles.liveWalkerTrackerPin,
+              ]}
+            >
+              <Ionicons
+                name={activeWalkNav ? 'navigate' : 'bus'}
+                size={14}
+                color="#FFFFFF"
+                style={
+                  activeWalkNav && userHeading !== null
+                    ? { transform: [{ rotate: `${Math.round(userHeading - 45)}deg` }] }
+                    : undefined
+                }
+              />
             </View>
           </Marker>
+        )}
+
+        {/* Active In-App Walking Navigation Highlighted Street Path + Next Turn Pin */}
+        {activeWalkNav && activeWalkNav.route.coordinates.length >= 2 && (
+          <>
+            <Polyline
+              coordinates={activeWalkNav.route.coordinates}
+              strokeColor="#09131F"
+              strokeWidth={8}
+            />
+            <Polyline
+              coordinates={activeWalkNav.route.coordinates}
+              strokeColor="#30D158"
+              strokeWidth={5}
+            />
+            {(() => {
+              const nextIdx = Math.min(
+                activeWalkNav.progress.activeStepIndex + 1,
+                activeWalkNav.route.steps.length - 1
+              );
+              const nextStep = activeWalkNav.route.steps[nextIdx];
+              if (!nextStep || activeWalkNav.progress.arrived) return null;
+              return (
+                <Marker
+                  coordinate={nextStep.location}
+                  anchor={{ x: 0.5, y: 0.5 }}
+                  tracksViewChanges={false}
+                  zIndex={55}
+                >
+                  <View style={styles.walkNextTurnMapDot}>
+                    <Ionicons name={nextStep.icon} size={11} color="#052E16" />
+                  </View>
+                </Marker>
+              );
+            })()}
+          </>
         )}
 
         {/* Boarding & Alighting Stop Markers + Route Polyline */}
@@ -1532,18 +1915,27 @@ function MainApp() {
                     );
                   })}
 
-                <Polyline
-                  coordinates={[
-                    { latitude: activeOrigin.lat, longitude: activeOrigin.lon },
-                    {
-                      latitude: activeMapBusOption.originStopLat,
-                      longitude: activeMapBusOption.originStopLon,
-                    },
-                  ]}
-                  strokeColor="#64D2FF"
-                  strokeWidth={3.5}
-                  lineDashPattern={[6, 6]}
-                />
+                {activeWalkNav?.leg !== 'to_bus' && (
+                  <Polyline
+                    coordinates={
+                      selectedJourney && walkToBusRoute
+                        ? walkToBusRoute.coordinates
+                        : [
+                            {
+                              latitude: activeOrigin.lat,
+                              longitude: activeOrigin.lon,
+                            },
+                            {
+                              latitude: activeMapBusOption.originStopLat,
+                              longitude: activeMapBusOption.originStopLon,
+                            },
+                          ]
+                    }
+                    strokeColor="#64D2FF"
+                    strokeWidth={3.5}
+                    lineDashPattern={[6, 6]}
+                  />
+                )}
 
                 <Polyline
                   coordinates={[
@@ -1560,41 +1952,56 @@ function MainApp() {
                   strokeWidth={5}
                 />
 
-                <Polyline
-                  coordinates={[
-                    {
-                      latitude: activeMapBusOption.alightStopLat,
-                      longitude: activeMapBusOption.alightStopLon,
-                    },
-                    {
-                      latitude: selectedStationRec.station.lat,
-                      longitude: selectedStationRec.station.lon,
-                    },
-                  ]}
-                  strokeColor="#30D158"
-                  strokeWidth={3.5}
-                  lineDashPattern={[5, 5]}
-                />
+                {activeWalkNav?.leg !== 'from_bus' && (
+                  <Polyline
+                    coordinates={
+                      selectedJourney && walkFromBusRoute
+                        ? walkFromBusRoute.coordinates
+                        : [
+                            {
+                              latitude: activeMapBusOption.alightStopLat,
+                              longitude: activeMapBusOption.alightStopLon,
+                            },
+                            {
+                              latitude: selectedStationRec.station.lat,
+                              longitude: selectedStationRec.station.lon,
+                            },
+                          ]
+                    }
+                    strokeColor="#30D158"
+                    strokeWidth={3.5}
+                    lineDashPattern={[5, 5]}
+                  />
+                )}
               </>
             ) : (
-              <Polyline
-                coordinates={[
-                  { latitude: activeOrigin.lat, longitude: activeOrigin.lon },
-                  {
-                    latitude: selectedStationRec.station.lat,
-                    longitude: selectedStationRec.station.lon,
-                  },
-                ]}
-                strokeColor="#30D158"
-                strokeWidth={4}
-                lineDashPattern={[6, 6]}
-              />
+              activeWalkNav?.leg !== 'direct' && (
+                <Polyline
+                  coordinates={
+                    selectedJourney && walkToBusRoute
+                      ? walkToBusRoute.coordinates
+                      : [
+                          {
+                            latitude: activeOrigin.lat,
+                            longitude: activeOrigin.lon,
+                          },
+                          {
+                            latitude: selectedStationRec.station.lat,
+                            longitude: selectedStationRec.station.lon,
+                          },
+                        ]
+                  }
+                  strokeColor="#30D158"
+                  strokeWidth={4}
+                  lineDashPattern={[6, 6]}
+                />
+              )
             )}
           </>
         )}
       </MapView>
 
-      {/* 2. Floating Top Card (iOS Liquid Glass / Android Material 3 Expressive) */}
+      {/* 2. Floating Top Card (or Live In-App Turn-by-Turn Walking Navigation HUD) */}
       <SafeAreaView
         edges={['top']}
         style={styles.topFloatingSafe}
@@ -1606,6 +2013,165 @@ function MainApp() {
           }
         }}
       >
+        {activeWalkNav ? (
+          (() => {
+            const { route, progress, destNameHe, destNameEn, recalculating } =
+              activeWalkNav;
+            const currentStep =
+              route.steps[progress.activeStepIndex] || route.steps[0];
+            const nextStep =
+              route.steps[progress.activeStepIndex + 1] || null;
+            const destLabel = isRTL ? destNameHe : destNameEn;
+            const mainInstruction = progress.arrived
+              ? t.walkNavArrived
+              : isRTL
+              ? currentStep.instructionHe
+              : currentStep.instructionEn;
+            const nextInstruction =
+              !progress.arrived && nextStep
+                ? isRTL
+                  ? nextStep.instructionHe
+                  : nextStep.instructionEn
+                : null;
+
+            return (
+              <AdaptiveSurface
+                intensity={75}
+                tonalLevel="high"
+                style={styles.walkNavHudCard}
+              >
+                <View style={[styles.walkNavHudMainRow, { flexDirection: rowDir }]}>
+                  <View
+                    style={[
+                      styles.walkNavManeuverBadge,
+                      progress.arrived && styles.walkNavManeuverBadgeArrived,
+                    ]}
+                  >
+                    <Ionicons
+                      name={progress.arrived ? 'checkmark-circle' : currentStep.icon}
+                      size={26}
+                      color="#FFFFFF"
+                    />
+                  </View>
+
+                  <View
+                    style={{
+                      flex: 1,
+                      alignItems: isRTL ? 'flex-end' : 'flex-start',
+                      gap: 2,
+                    }}
+                  >
+                    <View
+                      style={[
+                        styles.walkNavDistanceRow,
+                        { flexDirection: rowDir },
+                      ]}
+                    >
+                      <Text style={styles.walkNavTurnDistText}>
+                        {recalculating
+                          ? t.walkNavRecalculating
+                          : progress.arrived
+                          ? `🎉 ${destLabel}`
+                          : t.walkNavNextTurnIn.replace(
+                              '{m}',
+                              String(progress.distanceToNextTurnMeters)
+                            )}
+                      </Text>
+                      {!progress.arrived && (
+                        <View style={styles.walkNavLivePill}>
+                          <View style={styles.liveGreenPulseDot} />
+                          <Text style={styles.walkNavLivePillText}>
+                            {progress.remainingDistanceMeters}
+                            {t.metersUnit} • ~{progress.remainingMinutes}{' '}
+                            {t.minUnit}
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+
+                    <Text
+                      style={[styles.walkNavInstructionText, { textAlign }]}
+                      numberOfLines={2}
+                    >
+                      {mainInstruction}
+                    </Text>
+
+                    {nextInstruction && (
+                      <Text
+                        style={[styles.walkNavThenText, { textAlign }]}
+                        numberOfLines={1}
+                      >
+                        {t.walkNavThen} {nextInstruction}
+                      </Text>
+                    )}
+                  </View>
+                </View>
+
+                <View style={[styles.walkNavHudFooter, { flexDirection: rowDir }]}>
+                  <Text
+                    style={[styles.walkNavDestMeta, { textAlign }]}
+                    numberOfLines={1}
+                  >
+                    🚶 {destLabel}
+                  </Text>
+
+                  <View style={[styles.walkNavHudActions, { flexDirection: rowDir }]}>
+                    <TouchableOpacity
+                      style={[styles.walkNavActionChip, { flexDirection: rowDir }]}
+                      onPress={() => {
+                        triggerHaptic('selection');
+                        setActiveWalkNav((prev) =>
+                          prev ? { ...prev, followUser: true } : null
+                        );
+                        if (mapRef.current) {
+                          if (liveUserCoords) {
+                            mapRef.current.animateToRegion(
+                              {
+                                latitude: liveUserCoords.lat,
+                                longitude: liveUserCoords.lon,
+                                latitudeDelta: 0.0038,
+                                longitudeDelta: 0.0038,
+                              },
+                              450
+                            );
+                          } else {
+                            mapRef.current.fitToCoordinates(route.coordinates, {
+                              edgePadding: {
+                                top: Math.max(190, topOverlayBottomY + 24),
+                                right: 48,
+                                bottom: sheetCollapsedHeight + 48,
+                                left: 48,
+                              },
+                              animated: true,
+                            });
+                          }
+                        }
+                      }}
+                    >
+                      <Ionicons name="locate" size={14} color="#64D2FF" />
+                      <Text style={styles.walkNavRecenterText}>
+                        {t.walkNavRecenter}
+                      </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[styles.walkNavStopChip, { flexDirection: rowDir }]}
+                      onPress={() => {
+                        triggerHaptic('light');
+                        stopWalkNav();
+                      }}
+                    >
+                      <Ionicons name="close" size={14} color="#FFFFFF" />
+                      <Text style={styles.walkNavStopText}>
+                        {t.stopWalkNav}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </AdaptiveSurface>
+            );
+          })()
+        ) : (
         <AdaptiveSurface intensity={60} tonalLevel="high" style={styles.topGlassCard}>
           <View style={[styles.topHeaderRow, { flexDirection: rowDir }]}>
             <AdaptivePressable
@@ -1803,6 +2369,7 @@ function MainApp() {
             />
           )}
         </AdaptiveSurface>
+        )}
 
         {/* Live Get-Off Alert Floating Banner */}
         {activeAlertBanner && (
@@ -2085,29 +2652,78 @@ function MainApp() {
                                 {t.minUnit})
                               </Text>
 
-                              <TouchableOpacity
+                              <View
                                 style={[
-                                  styles.inlineActionBtn,
+                                  styles.walkActionRow,
                                   { flexDirection: rowDir },
                                 ]}
-                                onPress={() =>
-                                  openDirectionsToCoords(
-                                    bus.originStopLat,
-                                    bus.originStopLon,
-                                    origName,
-                                    'walking'
-                                  )
-                                }
                               >
-                                <Ionicons
-                                  name="navigate"
-                                  size={13}
-                                  color="#FFFFFF"
-                                />
-                                <Text style={styles.inlineActionBtnText}>
-                                  {t.startWalkingInMaps}
-                                </Text>
-                              </TouchableOpacity>
+                                <TouchableOpacity
+                                  style={[
+                                    styles.inlineActionBtn,
+                                    activeWalkNav?.leg === 'to_bus' &&
+                                      styles.inlineActionBtnStop,
+                                    { flexDirection: rowDir },
+                                  ]}
+                                  onPress={() => {
+                                    if (activeWalkNav?.leg === 'to_bus') {
+                                      stopWalkNav();
+                                    } else {
+                                      startInAppWalkNav(
+                                        'to_bus',
+                                        activeOrigin.lat,
+                                        activeOrigin.lon,
+                                        bus.originStopLat,
+                                        bus.originStopLon,
+                                        bus.originStopNameHe,
+                                        bus.originStopNameEn,
+                                        walkToBusRoute
+                                      );
+                                    }
+                                  }}
+                                >
+                                  <Ionicons
+                                    name={
+                                      activeWalkNav?.leg === 'to_bus'
+                                        ? 'stop-circle'
+                                        : 'walk'
+                                    }
+                                    size={14}
+                                    color="#FFFFFF"
+                                  />
+                                  <Text style={styles.inlineActionBtnText}>
+                                    {activeWalkNav?.leg === 'to_bus'
+                                      ? t.stopWalkNav
+                                      : loadingWalkRoutes && !walkToBusRoute
+                                      ? t.walkNavLoading
+                                      : t.startInAppWalkNav}
+                                  </Text>
+                                </TouchableOpacity>
+
+                                <TouchableOpacity
+                                  style={[
+                                    styles.externalMapsMiniBtn,
+                                    { flexDirection: rowDir },
+                                  ]}
+                                  onPress={() =>
+                                    openDirectionsToCoords(
+                                      bus.originStopLat,
+                                      bus.originStopLon,
+                                      origName,
+                                      'walking'
+                                    )
+                                  }
+                                >
+                                  <Ionicons
+                                    name="map-outline"
+                                    size={13}
+                                    color="#93C5FD"
+                                  />
+                                  <Text style={styles.externalMapsMiniText}>
+                                    {t.walkNavExternalMaps}
+                                  </Text>
+                                </TouchableOpacity>
+                              </View>
                             </View>
                           </View>
 
@@ -2338,6 +2954,77 @@ function MainApp() {
                                 {t.minUnit})
                                 {entranceHint ? ` • ${entranceHint}` : ''}
                               </Text>
+
+                              <View
+                                style={[
+                                  styles.walkActionRow,
+                                  { flexDirection: rowDir },
+                                ]}
+                              >
+                                <TouchableOpacity
+                                  style={[
+                                    styles.inlineActionBtnGreen,
+                                    activeWalkNav?.leg === 'from_bus' &&
+                                      styles.inlineActionBtnStop,
+                                    { flexDirection: rowDir },
+                                  ]}
+                                  onPress={() => {
+                                    if (activeWalkNav?.leg === 'from_bus') {
+                                      stopWalkNav();
+                                    } else {
+                                      startInAppWalkNav(
+                                        'from_bus',
+                                        bus.alightStopLat,
+                                        bus.alightStopLon,
+                                        rec.station.lat,
+                                        rec.station.lon,
+                                        rec.station.name_he,
+                                        rec.station.name_en,
+                                        walkFromBusRoute
+                                      );
+                                    }
+                                  }}
+                                >
+                                  <Ionicons
+                                    name={
+                                      activeWalkNav?.leg === 'from_bus'
+                                        ? 'stop-circle'
+                                        : 'walk'
+                                    }
+                                    size={14}
+                                    color="#FFFFFF"
+                                  />
+                                  <Text style={styles.inlineActionBtnText}>
+                                    {activeWalkNav?.leg === 'from_bus'
+                                      ? t.stopWalkNav
+                                      : t.startInAppWalkNav}
+                                  </Text>
+                                </TouchableOpacity>
+
+                                <TouchableOpacity
+                                  style={[
+                                    styles.externalMapsMiniBtn,
+                                    { flexDirection: rowDir },
+                                  ]}
+                                  onPress={() =>
+                                    openDirectionsToCoords(
+                                      rec.station.lat,
+                                      rec.station.lon,
+                                      stName,
+                                      'walking'
+                                    )
+                                  }
+                                >
+                                  <Ionicons
+                                    name="map-outline"
+                                    size={13}
+                                    color="#93C5FD"
+                                  />
+                                  <Text style={styles.externalMapsMiniText}>
+                                    {t.walkNavExternalMaps}
+                                  </Text>
+                                </TouchableOpacity>
+                              </View>
                             </View>
                           </View>
 
@@ -2431,29 +3118,159 @@ function MainApp() {
                         ? selectedJourney.recommendation.scooterArriveFormatted
                         : selectedJourney.recommendation.walkArriveFormatted}
                     </Text>
-                    <TouchableOpacity
+                    <View
                       style={[
-                        styles.inlineActionBtn,
-                        { flexDirection: rowDir, marginTop: 8 },
+                        styles.walkActionRow,
+                        { flexDirection: rowDir, marginTop: 10 },
                       ]}
-                      onPress={() =>
-                        openDirectionsToCoords(
-                          selectedJourney.recommendation.station.lat,
-                          selectedJourney.recommendation.station.lon,
-                          isRTL
-                            ? selectedJourney.recommendation.station.name_he
-                            : selectedJourney.recommendation.station.name_en,
-                          selectedJourney.mode === 'scooter'
-                            ? 'bicycling'
-                            : 'walking'
-                        )
-                      }
                     >
-                      <Ionicons name="navigate" size={14} color="#FFFFFF" />
-                      <Text style={styles.inlineActionBtnText}>
-                        {t.navigateToStationMaps}
-                      </Text>
-                    </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[
+                          styles.inlineActionBtnGreen,
+                          activeWalkNav?.leg === 'direct' &&
+                            styles.inlineActionBtnStop,
+                          { flexDirection: rowDir },
+                        ]}
+                        onPress={() => {
+                          if (activeWalkNav?.leg === 'direct') {
+                            stopWalkNav();
+                          } else {
+                            startInAppWalkNav(
+                              'direct',
+                              activeOrigin.lat,
+                              activeOrigin.lon,
+                              selectedJourney.recommendation.station.lat,
+                              selectedJourney.recommendation.station.lon,
+                              selectedJourney.recommendation.station.name_he,
+                              selectedJourney.recommendation.station.name_en,
+                              walkToBusRoute
+                            );
+                          }
+                        }}
+                      >
+                        <Ionicons
+                          name={
+                            activeWalkNav?.leg === 'direct'
+                              ? 'stop-circle'
+                              : 'walk'
+                          }
+                          size={15}
+                          color="#FFFFFF"
+                        />
+                        <Text style={styles.inlineActionBtnText}>
+                          {activeWalkNav?.leg === 'direct'
+                            ? t.stopWalkNav
+                            : loadingWalkRoutes && !walkToBusRoute
+                            ? t.walkNavLoading
+                            : t.startInAppWalkNav}
+                        </Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={[
+                          styles.externalMapsMiniBtn,
+                          { flexDirection: rowDir },
+                        ]}
+                        onPress={() =>
+                          openDirectionsToCoords(
+                            selectedJourney.recommendation.station.lat,
+                            selectedJourney.recommendation.station.lon,
+                            isRTL
+                              ? selectedJourney.recommendation.station.name_he
+                              : selectedJourney.recommendation.station.name_en,
+                            selectedJourney.mode === 'scooter'
+                              ? 'bicycling'
+                              : 'walking'
+                          )
+                        }
+                      >
+                        <Ionicons
+                          name="map-outline"
+                          size={13}
+                          color="#93C5FD"
+                        />
+                        <Text style={styles.externalMapsMiniText}>
+                          {t.walkNavExternalMaps}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+
+                    {walkToBusRoute && walkToBusRoute.steps.length > 1 && (
+                      <View style={{ marginTop: 10, width: '100%' }}>
+                        <TouchableOpacity
+                          style={[
+                            styles.toggleStopsBtn,
+                            {
+                              flexDirection: rowDir,
+                              alignSelf: isRTL ? 'flex-end' : 'flex-start',
+                            },
+                          ]}
+                          onPress={() => {
+                            triggerHaptic('selection');
+                            setShowWalkSteps((prev) => !prev);
+                          }}
+                        >
+                          <Ionicons
+                            name={showWalkSteps ? 'chevron-up' : 'chevron-down'}
+                            size={14}
+                            color="#64D2FF"
+                          />
+                          <Text style={styles.toggleStopsBtnText}>
+                            {showWalkSteps
+                              ? t.walkNavHideSteps
+                              : t.walkNavShowSteps.replace(
+                                  '{s}',
+                                  String(walkToBusRoute.steps.length)
+                                )}
+                          </Text>
+                        </TouchableOpacity>
+
+                        {showWalkSteps && (
+                          <View style={styles.intermediateListBox}>
+                            {walkToBusRoute.steps.map((step, sIdx) => {
+                              const isCurrentStep =
+                                activeWalkNav?.leg === 'direct' &&
+                                activeWalkNav.progress.activeStepIndex === sIdx;
+                              return (
+                                <View
+                                  key={`walk_step_${sIdx}`}
+                                  style={[
+                                    styles.intermediateStopRow,
+                                    isCurrentStep &&
+                                      styles.intermediateStopRowCurrent,
+                                    { flexDirection: rowDir },
+                                  ]}
+                                >
+                                  <Ionicons
+                                    name={step.icon}
+                                    size={14}
+                                    color={isCurrentStep ? '#30D158' : '#93C5FD'}
+                                  />
+                                  <Text
+                                    style={[
+                                      styles.intermediateStopName,
+                                      isCurrentStep &&
+                                        styles.intermediateStopNameCurrent,
+                                      { textAlign },
+                                    ]}
+                                  >
+                                    {isRTL
+                                      ? step.instructionHe
+                                      : step.instructionEn}
+                                  </Text>
+                                  {step.distanceMeters > 0 && (
+                                    <Text style={styles.intermediateMinText}>
+                                      {step.distanceMeters}
+                                      {t.metersUnit}
+                                    </Text>
+                                  )}
+                                </View>
+                              );
+                            })}
+                          </View>
+                        )}
+                      </View>
+                    )}
                   </View>
                 )}
               </ScrollView>
@@ -4452,5 +5269,162 @@ const styles = StyleSheet.create({
   modalPresetTextActive: {
     color: '#FFFFFF',
     fontWeight: '800',
+  },
+  // In-App Walking Navigation Styles
+  liveWalkerTrackerPin: {
+    backgroundColor: '#30D158',
+    borderColor: '#FFFFFF',
+  },
+  walkNextTurnMapDot: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#30D158',
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  walkNavHudCard: {
+    borderRadius: IS_ANDROID ? 22 : 24,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(48, 209, 88, 0.55)',
+    backgroundColor: IS_ANDROID ? '#0F1B16' : 'rgba(10, 22, 18, 0.9)',
+    gap: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.35,
+    shadowRadius: 12,
+    elevation: 10,
+  },
+  walkNavHudMainRow: {
+    alignItems: 'center',
+    gap: 12,
+  },
+  walkNavManeuverBadge: {
+    width: 48,
+    height: 48,
+    borderRadius: 16,
+    backgroundColor: '#16A34A',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  walkNavManeuverBadgeArrived: {
+    backgroundColor: '#0A84FF',
+  },
+  walkNavDistanceRow: {
+    width: '100%',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  walkNavTurnDistText: {
+    color: '#6EE7B7',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  walkNavLivePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+  },
+  walkNavLivePillText: {
+    color: '#E2E8F0',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  walkNavInstructionText: {
+    color: '#FFFFFF',
+    fontSize: 17,
+    fontWeight: '800',
+    lineHeight: 22,
+  },
+  walkNavThenText: {
+    color: 'rgba(255, 255, 255, 0.65)',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  walkNavHudFooter: {
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.1)',
+    paddingTop: 8,
+    gap: 8,
+  },
+  walkNavDestMeta: {
+    flex: 1,
+    color: 'rgba(255, 255, 255, 0.78)',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  walkNavHudActions: {
+    alignItems: 'center',
+    gap: 8,
+  },
+  walkNavActionChip: {
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(100, 210, 255, 0.16)',
+    borderWidth: 1,
+    borderColor: 'rgba(100, 210, 255, 0.45)',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+  },
+  walkNavRecenterText: {
+    color: '#64D2FF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  walkNavStopChip: {
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: '#DC2626',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+  },
+  walkNavStopText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  walkActionRow: {
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 6,
+  },
+  inlineActionBtnGreen: {
+    backgroundColor: '#16A34A',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 10,
+    alignItems: 'center',
+    gap: 6,
+  },
+  inlineActionBtnStop: {
+    backgroundColor: '#DC2626',
+  },
+  externalMapsMiniBtn: {
+    backgroundColor: 'rgba(147, 197, 253, 0.14)',
+    borderWidth: 1,
+    borderColor: 'rgba(147, 197, 253, 0.35)',
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 10,
+    alignItems: 'center',
+    gap: 4,
+  },
+  externalMapsMiniText: {
+    color: '#93C5FD',
+    fontSize: 12,
+    fontWeight: '700',
   },
 });
