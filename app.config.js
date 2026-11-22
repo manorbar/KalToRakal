@@ -30,6 +30,7 @@ module.exports = () => {
     plugins: [
       ...(baseConfig.expo.plugins || []),
       './plugins/withWorkManagerProguard',
+      './plugins/withLocalNotificationsOnly',
       [
         'react-native-maps',
         {
