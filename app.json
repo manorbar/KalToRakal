@@ -17,6 +17,7 @@
       "buildNumber": "1",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
+        "UIBackgroundModes": ["location"],
         "NSLocationWhenInUseUsageDescription": "קל לרק\"ל משתמש במיקומך כדי למצוא את תחנות הדנקל הקרובות ביותר, קווי אוטובוס בזמן אמת ולהתריע לפני תחנת הירידה. KalToRakal uses your location to find the fastest live routes to the nearest Dankal stations and send get-off alerts."
       }
     },
@@ -30,6 +31,9 @@
       "permissions": [
         "ACCESS_COARSE_LOCATION",
         "ACCESS_FINE_LOCATION",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_LOCATION",
+        "WAKE_LOCK",
         "POST_NOTIFICATIONS",
         "VIBRATE"
       ]

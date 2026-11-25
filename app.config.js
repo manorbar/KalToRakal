@@ -29,6 +29,12 @@ module.exports = () => {
     },
     plugins: [
       ...(baseConfig.expo.plugins || []),
+      [
+        'expo-location',
+        {
+          isAndroidForegroundServiceEnabled: true,
+        },
+      ],
       './plugins/withWorkManagerProguard',
       './plugins/withLocalNotificationsOnly',
       [

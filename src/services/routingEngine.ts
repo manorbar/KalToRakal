@@ -239,7 +239,7 @@ function findCandidateFeederConnections(
   userLon: number,
   targetStationIds: Set<string>,
   dayOfWeek: number,
-  maxWalkToBusMeters = 500
+  maxWalkToBusMeters = 650
 ): {
   matches: FeederMatch[];
   originStopCodesToQuery: string[];
@@ -354,7 +354,7 @@ function findCandidateFeederConnections(
 
   const originStopCodesToQuery = Array.from(originStopsWithValidRoutes.entries())
     .sort((a, b) => a[1] - b[1])
-    .slice(0, 8)
+    .slice(0, 14)
     .map(([code]) => code);
 
   return { matches, originStopCodesToQuery };
@@ -530,7 +530,11 @@ export async function computeRoutesToNearestDankalStations(
           const waitMinRaw = Math.round(
             (etaDate.getTime() - effectiveDate.getTime()) / 60000
           );
-          if (waitMinRaw < walkToBusMinutes - 1 || waitMinRaw > 45) continue;
+          const minCatchableWait = Math.max(
+            0,
+            Math.floor(walkToBusMinutes * 0.65)
+          );
+          if (waitMinRaw < minCatchableWait || waitMinRaw > 45) continue;
 
           const waitMinutes = Math.max(0, waitMinRaw);
           const spareMinutesToWalk = waitMinRaw - walkToBusMinutes;
@@ -631,7 +635,11 @@ export async function computeRoutesToNearestDankalStations(
             if (earlyMargin < 0 || earlyMargin > 45) continue;
           } else {
             const waitMin = busAtOriginMin - refTarget;
-            if (waitMin < walkToBusMinutes - 1 || waitMin > 45) continue;
+            const minCatchableWait = Math.max(
+              0,
+              Math.floor(walkToBusMinutes * 0.65)
+            );
+            if (waitMin < minCatchableWait || waitMin > 45) continue;
           }
 
           const waitMinRaw = busAtOriginMin - refTarget;
@@ -734,7 +742,25 @@ export async function computeRoutesToNearestDankalStations(
       }
     }
 
-    const topBusOptions = liveBusOptions.slice(0, 4);
+    // Diversify by distinct lineName first so multiple departures of one frequent line
+    // never crowd out other feeder lines (e.g. Line 41 to Shaham).
+    const topBusOptions: LiveBusOption[] = [];
+    const seenLineNames = new Set<string>();
+    for (const opt of liveBusOptions) {
+      if (!seenLineNames.has(opt.lineName)) {
+        seenLineNames.add(opt.lineName);
+        topBusOptions.push(opt);
+        if (topBusOptions.length >= 5) break;
+      }
+    }
+    if (topBusOptions.length < 4) {
+      for (const opt of liveBusOptions) {
+        if (!topBusOptions.includes(opt)) {
+          topBusOptions.push(opt);
+          if (topBusOptions.length >= 4) break;
+        }
+      }
+    }
     const bestBusMin =
       topBusOptions.length > 0 ? topBusOptions[0].totalMinutes : Infinity;
     const bestTotalMinutes = Math.min(walkMinutes, bestBusMin);

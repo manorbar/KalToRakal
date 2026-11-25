@@ -118,7 +118,20 @@ jest.mock('expo-location', () => ({
     return { remove: mockRemoveWatch };
   }),
   watchHeadingAsync: jest.fn(async () => ({ remove: jest.fn() })),
+  hasStartedLocationUpdatesAsync: jest.fn(async () => false),
+  startLocationUpdatesAsync: jest.fn(async () => undefined),
+  stopLocationUpdatesAsync: jest.fn(async () => undefined),
   Accuracy: { Balanced: 3, High: 4, BestForNavigation: 6 },
+}));
+
+jest.mock('expo-task-manager', () => ({
+  defineTask: jest.fn(),
+  isTaskDefined: jest.fn(() => false),
+}));
+
+jest.mock('expo-keep-awake', () => ({
+  activateKeepAwakeAsync: jest.fn(async () => undefined),
+  deactivateKeepAwake: jest.fn(async () => undefined),
 }));
 
 jest.mock('expo-notifications', () => ({
@@ -126,7 +139,11 @@ jest.mock('expo-notifications', () => ({
   setNotificationChannelAsync: jest.fn(async () => undefined),
   requestPermissionsAsync: jest.fn(async () => ({ status: 'granted' })),
   scheduleNotificationAsync: jest.fn(async () => 'notif-1'),
-  AndroidImportance: { MAX: 5 },
+  dismissNotificationAsync: jest.fn(async () => undefined),
+  cancelScheduledNotificationAsync: jest.fn(async () => undefined),
+  AndroidImportance: { LOW: 2, MAX: 5 },
+  AndroidNotificationPriority: { LOW: 'low', MAX: 'max' },
+  AndroidNotificationVisibility: { PUBLIC: 1 },
 }));
 
 jest.mock('react-native-safe-area-context', () => {
@@ -464,5 +481,46 @@ describe('KalToRakal Real-World End-to-End Interaction Tests', () => {
     await waitFor(() => {
       expect(mockRemoveWatch).toHaveBeenCalled();
     });
+  });
+
+  test('7. Line 41 is suggested to Shaham at 07:50 from Kiryat Ono, and Foreground Service + Live Notification activate on tracking', async () => {
+    const { computeRoutesToNearestDankalStations } = require('../src/services/routingEngine');
+    const Notifications = require('expo-notifications');
+    const KeepAwake = require('expo-keep-awake');
+
+    const morning750 = new Date('2026-11-25T07:50:00+02:00');
+    const recs = await computeRoutesToNearestDankalStations(
+      32.05742,
+      34.8644,
+      3,
+      'depart_at',
+      morning750,
+      'any'
+    );
+    const shaham = recs.find((r: any) => r.station.id === 'st_36313');
+    expect(shaham).toBeTruthy();
+    const line41 = shaham.liveBusOptions.find((b: any) => b.lineName === '41');
+    expect(line41).toBeTruthy();
+    expect(line41.etaFormatted).toBe('07:53');
+
+    // Verify background nav protection + live status notification activate and clean up cleanly
+    const {
+      startActiveNavProtection,
+      stopActiveNavProtection,
+    } = require('../src/services/backgroundNavigation');
+    await startActiveNavProtection('🚌 קו 41 ← שחם', 'נותרו 4 תחנות');
+    expect(Location.startLocationUpdatesAsync).toHaveBeenCalled();
+    expect(KeepAwake.activateKeepAwakeAsync).toHaveBeenCalled();
+    expect(Notifications.scheduleNotificationAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        identifier: 'kaltorakal-live-status',
+        content: expect.objectContaining({ sticky: true }),
+      })
+    );
+    await stopActiveNavProtection();
+    expect(KeepAwake.deactivateKeepAwake).toHaveBeenCalled();
+    expect(Notifications.dismissNotificationAsync).toHaveBeenCalledWith(
+      'kaltorakal-live-status'
+    );
   });
 });

@@ -73,6 +73,11 @@ import {
   fetchWalkingRoute,
   computeWalkingProgress,
 } from './src/services/walkingNavigation';
+import {
+  startActiveNavProtection,
+  stopActiveNavProtection,
+  updateLiveTrackingNotification,
+} from './src/services/backgroundNavigation';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -238,6 +243,8 @@ function MainApp() {
 
   // Live Route Progress & Get-Off Alert State
   const [isTrackingRide, setIsTrackingRide] = useState<boolean>(false);
+  const isTrackingRideRef = useRef(isTrackingRide);
+  isTrackingRideRef.current = isTrackingRide;
   const [liveUserCoords, setLiveUserCoords] = useState<{
     lat: number;
     lon: number;
@@ -490,6 +497,9 @@ function MainApp() {
     }
     setActiveWalkNav(null);
     setUserHeading(null);
+    if (!isTrackingRideRef.current) {
+      stopActiveNavProtection();
+    }
   }, []);
 
   const stopAllTracking = useCallback(() => {
@@ -499,6 +509,7 @@ function MainApp() {
       locationSubRef.current = null;
     }
     stopWalkNav();
+    stopActiveNavProtection();
     setIsTrackingRide(false);
     setLiveUserCoords(null);
     setCurrentStopIndex(-1);
@@ -667,6 +678,123 @@ function MainApp() {
 
       if (!gpsGranted) return;
 
+      const formatWalkNotif = (
+        r: WalkingRoute,
+        prog: WalkingProgress,
+        dHe: string,
+        dEn: string
+      ) => {
+        const destLbl = isRTL ? dHe : dEn;
+        const step = r.steps[prog.activeStepIndex] || r.steps[0];
+        const instr = prog.arrived
+          ? t.walkNavArrived
+          : isRTL
+          ? step.instructionHe
+          : step.instructionEn;
+        const title = prog.arrived
+          ? `🎉 ${destLbl}`
+          : `🚶 ${destLbl} • ${prog.remainingDistanceMeters}${t.metersUnit} (~${prog.remainingMinutes} ${t.minUnit})`;
+        const body = prog.arrived
+          ? t.walkNavArrived
+          : `${instr} • ${t.walkNavNextTurnIn.replace(
+              '{m}',
+              String(prog.distanceToNextTurnMeters)
+            )}`;
+        return { title, body };
+      };
+
+      const processWalkLocation = async (lat: number, lon: number) => {
+        if (sessionId !== walkNavSessionRef.current) return;
+        const current = activeWalkNavRef.current;
+        if (!current) return;
+
+        setLiveUserCoords({ lat, lon });
+
+        const nextProg = computeWalkingProgress(
+          lat,
+          lon,
+          current.route,
+          current.progress.activeStepIndex
+        );
+
+        if (nextProg.activeStepIndex > current.progress.activeStepIndex) {
+          triggerHaptic('selection');
+        }
+        if (nextProg.arrived && !current.progress.arrived) {
+          triggerHaptic('success');
+        }
+
+        setActiveWalkNav((prev) =>
+          prev ? { ...prev, progress: nextProg } : null
+        );
+
+        const notif = formatWalkNotif(
+          current.route,
+          nextProg,
+          current.destNameHe,
+          current.destNameEn
+        );
+        updateLiveTrackingNotification(notif.title, notif.body);
+
+        if (current.followUser && mapRef.current) {
+          mapRef.current.animateToRegion(
+            {
+              latitude: lat,
+              longitude: lon,
+              latitudeDelta: 0.0038,
+              longitudeDelta: 0.0038,
+            },
+            500
+          );
+        }
+
+        if (
+          nextProg.offRoute &&
+          Date.now() - walkRecalcTimeRef.current > 15000
+        ) {
+          walkRecalcTimeRef.current = Date.now();
+          setActiveWalkNav((prev) =>
+            prev ? { ...prev, recalculating: true } : null
+          );
+          const newRoute = await fetchWalkingRoute(
+            lat,
+            lon,
+            current.destLat,
+            current.destLon,
+            current.destNameHe,
+            current.destNameEn,
+            true
+          );
+          if (sessionId !== walkNavSessionRef.current) return;
+          const freshProg = computeWalkingProgress(lat, lon, newRoute, 0);
+          setActiveWalkNav((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  route: newRoute,
+                  progress: freshProg,
+                  recalculating: false,
+                }
+              : null
+          );
+        }
+      };
+
+      // Start Android Foreground Service + Live-Activity-like persistent notification + KeepAwake
+      const initNotif = formatWalkNotif(
+        route,
+        initialProgress,
+        destNameHe,
+        destNameEn
+      );
+      startActiveNavProtection(
+        initNotif.title,
+        initNotif.body,
+        (bgLat, bgLon) => {
+          processWalkLocation(bgLat, bgLon);
+        }
+      );
+
       try {
         const sub = await Location.watchPositionAsync(
           {
@@ -674,74 +802,8 @@ function MainApp() {
             timeInterval: 2500,
             distanceInterval: 4,
           },
-          async (pos) => {
-            if (sessionId !== walkNavSessionRef.current) return;
-            const current = activeWalkNavRef.current;
-            if (!current) return;
-
-            const { latitude: lat, longitude: lon } = pos.coords;
-            setLiveUserCoords({ lat, lon });
-
-            const nextProg = computeWalkingProgress(
-              lat,
-              lon,
-              current.route,
-              current.progress.activeStepIndex
-            );
-
-            if (nextProg.activeStepIndex > current.progress.activeStepIndex) {
-              triggerHaptic('selection');
-            }
-            if (nextProg.arrived && !current.progress.arrived) {
-              triggerHaptic('success');
-            }
-
-            setActiveWalkNav((prev) =>
-              prev ? { ...prev, progress: nextProg } : null
-            );
-
-            if (current.followUser && mapRef.current) {
-              mapRef.current.animateToRegion(
-                {
-                  latitude: lat,
-                  longitude: lon,
-                  latitudeDelta: 0.0038,
-                  longitudeDelta: 0.0038,
-                },
-                500
-              );
-            }
-
-            if (
-              nextProg.offRoute &&
-              Date.now() - walkRecalcTimeRef.current > 15000
-            ) {
-              walkRecalcTimeRef.current = Date.now();
-              setActiveWalkNav((prev) =>
-                prev ? { ...prev, recalculating: true } : null
-              );
-              const newRoute = await fetchWalkingRoute(
-                lat,
-                lon,
-                current.destLat,
-                current.destLon,
-                current.destNameHe,
-                current.destNameEn,
-                true
-              );
-              if (sessionId !== walkNavSessionRef.current) return;
-              const freshProg = computeWalkingProgress(lat, lon, newRoute, 0);
-              setActiveWalkNav((prev) =>
-                prev
-                  ? {
-                      ...prev,
-                      route: newRoute,
-                      progress: freshProg,
-                      recalculating: false,
-                    }
-                  : null
-              );
-            }
+          (pos) => {
+            processWalkLocation(pos.coords.latitude, pos.coords.longitude);
           }
         );
         if (sessionId !== walkNavSessionRef.current) {
@@ -845,6 +907,26 @@ function MainApp() {
         setCurrentStopIndex((prev) => Math.max(prev, closestIdx));
 
         const lastStopIdx = stops.length - 1;
+        const stopsRemaining = Math.max(0, lastStopIdx - Math.max(-1, closestIdx));
+        const nextStopObj =
+          stops[Math.min(lastStopIdx, Math.max(0, closestIdx + 1))];
+        const nextStopLabel = nextStopObj
+          ? isRTL
+            ? nextStopObj.nameHe
+            : nextStopObj.nameEn
+          : alightName;
+        const liveTitle = isRTL
+          ? `🚌 קו ${bus.lineName} ← דנקל ${stName}`
+          : `🚌 Line ${bus.lineName} → Dankal ${stName}`;
+        const liveBody =
+          stopsRemaining === 0
+            ? `${t.getOffHereBadge} • ${alightName}`
+            : `${t.stopsRemainingLabel.replace(
+                '{s}',
+                String(stopsRemaining)
+              )} • ${t.nextStopStatus}: ${nextStopLabel}`;
+        updateLiveTrackingNotification(liveTitle, liveBody);
+
         const distToAlight = haversineMeters(
           lat,
           lon,
@@ -910,6 +992,12 @@ function MainApp() {
           lon,
           rec.station.lat,
           rec.station.lon
+        );
+        const remMeters = Math.round(distToDankal);
+        const remMin = Math.max(1, Math.round(remMeters / 80));
+        updateLiveTrackingNotification(
+          isRTL ? `🚶 לדנקל ${stName}` : `🚶 To Dankal ${stName}`,
+          `${remMeters}${t.metersUnit} (~${remMin} ${t.minUnit})`
         );
         if (distToDankal <= 90 && !firedAlertsRef.current.doneFired) {
           firedAlertsRef.current.doneFired = true;
@@ -997,6 +1085,38 @@ function MainApp() {
 
       locationSubRef.current = sub;
       setIsTrackingRide(true);
+
+      // Start Android Foreground Service + Live-Activity-like persistent notification + KeepAwake
+      const rec = journeySnapshot.recommendation;
+      const stName = isRTL ? rec.station.name_he : rec.station.name_en;
+      const initTrackTitle =
+        journeySnapshot.mode === 'bus' && journeySnapshot.busOption
+          ? isRTL
+            ? `🚌 קו ${journeySnapshot.busOption.lineName} ← דנקל ${stName}`
+            : `🚌 Line ${journeySnapshot.busOption.lineName} → Dankal ${stName}`
+          : isRTL
+          ? `🚶 מעקב חי לדנקל ${stName}`
+          : `🚶 Live Tracking to Dankal ${stName}`;
+      const initTrackBody =
+        journeySnapshot.mode === 'bus' && journeySnapshot.busOption
+          ? `${t.stopsRemainingLabel.replace(
+              '{s}',
+              String(journeySnapshot.busOption.intermediateStops.length)
+            )} • ${t.alightAt} ${
+              isRTL
+                ? journeySnapshot.busOption.alightStopNameHe
+                : journeySnapshot.busOption.alightStopNameEn
+            }`
+          : t.trackingActiveBanner;
+
+      startActiveNavProtection(
+        initTrackTitle,
+        initTrackBody,
+        (bgLat, bgLon) => {
+          if (trackingSessionIdRef.current !== mySessionId) return;
+          evaluateRouteProgressRef.current(bgLat, bgLon, journeySnapshot);
+        }
+      );
       setShowIntermediateStops(true);
     } catch {
       setIsTrackingRide(false);
@@ -2884,6 +3004,12 @@ function MainApp() {
                                             style={styles.liveStopStatusTag}
                                           >
                                             🚌 {t.now}
+                                          </Text>
+                                        ) : isPassed ? (
+                                          <Text
+                                            style={styles.passedStopStatusTag}
+                                          >
+                                            ✓ {t.passedStopStatus}
                                           </Text>
                                         ) : isNext ? (
                                           <Text
@@ -5426,5 +5552,10 @@ const styles = StyleSheet.create({
     color: '#93C5FD',
     fontSize: 12,
     fontWeight: '700',
+  },
+  passedStopStatusTag: {
+    color: 'rgba(148, 163, 184, 0.72)',
+    fontSize: 11,
+    fontWeight: '600',
   },
 });
